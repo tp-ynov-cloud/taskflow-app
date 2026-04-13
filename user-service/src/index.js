@@ -9,6 +9,8 @@ const routes = require("./routes");
 const logger = pino({ level: process.env.LOG_LEVEL || "info" });
 const app = express();
 
+const ERROR_CODE = 400;
+
 app.use(express.json());
 app.use(
   pinoHttp({
