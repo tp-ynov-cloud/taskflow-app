@@ -30,3 +30,12 @@ Le collector est configuré avec :
 5. **Pipelines** :
    - `traces` : `otlp` → `batch` → `[otlp/tempo, debug]`
    - `metrics` : `otlp` → `batch` → `[debug]`
+
+---
+
+### Tempo — `infra/tempo/tempo.yml`
+
+1. **API/UI sur le port 3200** : `server.http_listen_port: 3200` — c'est l'adresse que Grafana utilise comme datasource Tempo
+2. **Réception gRPC** : `distributor.receivers.otlp.protocols.grpc` sur `0.0.0.0:4317` — protocole plus performant qu'HTTP pour la communication OTel Collector → Tempo
+3. **Stockage local** : `storage.trace.backend: local` avec `path: /tmp/tempo/traces`
+4. **Write-Ahead Log** : `wal.path: /tmp/tempo/wal` — buffer temporaire sur disque qui protège les traces en cas de crash avant leur écriture définitive
