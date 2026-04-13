@@ -1,26 +1,29 @@
 receivers:
-  otlp: 
-    # ...
+  otlp:
+    protocols:
+      grpc:
+      http:
 
 processors:
   batch: {}
 
 exporters:
-  otlp/tempo: 
-    # ...
-  debug: 
-    #...
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  debug:
 
 service:
-  telemetry: 
+  telemetry:
     metrics:
-      # ...
+      address: 0.0.0.0:8888
   pipelines:
     traces:
-      receivers: [...]
-      processors: [...]
-      exporters: [...]
-    metrics: 
-      receivers: [...]
-      processors: [...]
-      exporters: [...]
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/tempo, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
