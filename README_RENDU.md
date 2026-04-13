@@ -39,3 +39,22 @@ Le collector est configuré avec :
 2. **Réception gRPC** : `distributor.receivers.otlp.protocols.grpc` sur `0.0.0.0:4317` — protocole plus performant qu'HTTP pour la communication OTel Collector → Tempo
 3. **Stockage local** : `storage.trace.backend: local` avec `path: /tmp/tempo/traces`
 4. **Write-Ahead Log** : `wal.path: /tmp/tempo/wal` — buffer temporaire sur disque qui protège les traces en cas de crash avant leur écriture définitive
+
+---
+
+### Prometheus — `infra/prometheus/prometheus.yml`
+
+**Config globale** : `scrape_interval: 15s` et `evaluation_interval: 15s` — Prometheus scrape les cibles toutes les 15 secondes.
+
+**Scrape configs** :
+
+| job_name | target |
+|---|---|
+| `prometheus` | `localhost:9090` (auto-scrape) |
+| `api-gateway` | `api-gateway:3000` |
+| `user-service` | `user-service:3001` |
+| `task-service` | `task-service:3002` |
+| `notification-service` | `notification-service:3003` |
+| `otel-collector` | `otel-collector:8888` |
+
+Chaque service expose un endpoint `/metrics` en format Prometheus. Le collector OTel expose ses métriques internes sur le port 8888 (configuré via `service.telemetry.metrics` dans `infra/otel/config.yml`).
