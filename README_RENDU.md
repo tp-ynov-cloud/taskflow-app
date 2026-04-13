@@ -58,3 +58,47 @@ Le collector est configuré avec :
 | `otel-collector` | `otel-collector:8888` |
 
 Chaque service expose un endpoint `/metrics` en format Prometheus. Le collector OTel expose ses métriques internes sur le port 8888 (configuré via `service.telemetry.metrics` dans `infra/otel/config.yml`).
+
+---
+
+### Grafana — provisioning automatique
+
+#### Datasources — `infra/grafana/provisioning/datasources/datasources.yml`
+
+Grafana charge automatiquement les datasources au démarrage via le système de provisioning. Deux datasources sont configurées :
+
+- **Prometheus** (`http://prometheus:9090`) — définie comme datasource par défaut (`isDefault: true`)
+- **Tempo** (`http://tempo:3200`) — port 3200 configuré dans `tempo.yml`
+
+#### Dashboards — `infra/grafana/provisioning/dashboard/dashboard.yml`
+
+Le provider `file` indique à Grafana de charger tous les JSON présents dans `/var/lib/grafana/dashboards` au démarrage. Ce dossier sera monté via un volume Docker pointant vers `infra/grafana/dashboards/`.
+
+---
+
+### docker-compose.infra.yml
+
+#### Services et dépendances
+
+| Service | Image | Ports exposés |
+|---|---|---|
+| `tempo` | `grafana/tempo:latest` | `3200` (API/UI) |
+| `otel-collector` | `otel/opentelemetry-collector-contrib:latest` | `4317` gRPC, `4318` HTTP, `8888` métriques internes |
+| `prometheus` | `prom/prometheus:latest` | `9090` |
+| `grafana` | `grafana/grafana:latest` | `3100` → `3000` |
+
+#### Chaîne de dépendances
+
+```
+tempo
+  └── otel-collector (depends_on: tempo)
+        └── prometheus (depends_on: otel-collector)
+              └── grafana (depends_on: prometheus + tempo)
+```
+
+Tempo doit démarrer en premier car l'OTel Collector lui envoie des traces dès le lancement. Prometheus dépend du collector pour scraper ses métriques internes. Grafana attend Prometheus et Tempo pour que ses datasources soient disponibles.
+
+#### Persistance
+
+- `prometheus_data` — volume nommé monté sur `/prometheus`, préserve les séries temporelles entre redémarrages
+- `grafana_data` — volume nommé monté sur `/var/lib/grafana`, préserve dashboards, préférences et sessions
