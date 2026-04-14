@@ -47,6 +47,24 @@ services:
       - prometheus
       - tempo
 
+  loki:
+    image: grafana/loki:3.1.0
+    ports:
+      - "3110:3100"
+    volumes:
+      - ./infra/loki/loki-config.yml:/etc/loki/loki-config.yml
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+
+  promtail:
+    image: grafana/promtail:3.1.0
+    volumes:
+      - ./infra/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: ["-config.file=/etc/promtail/promtail-config.yml"]
+    depends_on:
+      - loki
+
 volumes:
   prometheus_data:
   grafana_data:

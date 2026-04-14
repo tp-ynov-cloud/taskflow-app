@@ -183,3 +183,66 @@ Dans Grafana > Explore > Tempo, on peut le retrouver avec la requête TraceQL :
 
 ![alt text](screenshots/public-task-created.png)
 
+---
+
+## C. Logs
+
+### Visualisation
+
+#### Filtrer les logs du task-service dans Loki
+
+La syntaxe LogQL utilisée pour filtrer les logs du task-service est `{job="task-service"}`. Le sélecteur entre accolades fonctionne comme en PromQL : on sélectionne un flux de logs par label.
+
+La différence avec Prometheus est que LogQL opère sur des lignes de texte horodatées, pas sur des valeurs numériques. En PromQL, tout ce qu'on peut faire après le sélecteur c'est filtrer ou agréger des nombres. En LogQL, on peut en plus filtrer sur le contenu des lignes, parser leur format, et extraire des champs. Le résultat par défaut est un flux de logs bruts, pas un graphe.
+
+![alt text](screenshots/loki-syntax.png)
+
+Quelle requête utiliser pour filtrer ?
+```log
+{service_name="/taskflow-app-task-service-1", level="error"} |= ``
+```
+![alt text](screenshots/loki-error.png)
+
+#### Logs d'erreur sur tous les services et filtrage sur statusCode 500
+
+Logs de niveau error sur tous les services :
+
+```logql
+{job=~".+"} | json | level="error"
+```
+
+Filtrage sur les requêtes ayant retourné un 500 :
+
+```logql
+{job=~".+"} | json | statusCode=`500`
+```
+
+**Comparaison avec Prometheus**
+
+Avec Prometheus on a un graph et pas directement les logs, alors qu'avec Loki il y a toutes les informations.
+![alt text](screenshots/prometheus-logs.png)
+![alt text](screenshots/loki-logs.png)
+
+L'approche Prometheus est la plus adaptée pour compter et alerter sur les erreurs 500. Loki est utile quand on veut voir le détail de chaque requête en erreur — le body, les headers, le message d'erreur exact — ce qu'une métrique seule ne peut pas fournir. Les deux sont complémentaires : Prometheus pour détecter, Loki pour investiguer.
+
+#### Corrélation logs ↔ traces
+
+Le traceId relevé dans Tempo après un POST /api/tasks : `cb67f832b3533ede816e99f2f420738c`
+
+Oui, on peut le retrouver dans Loki car l'auto-instrumentation OTel injecte le `trace_id` dans le contexte de chaque requête, et Pino le logue dans le JSON. Il suffit de chercher :
+
+```logql
+{job=~".+"} |= "cb67f832b3533ede816e99f2f420738c"
+```
+
+Pour que ce soit automatique, il faudrait configurer les **Derived Fields** dans la datasource Loki de Grafana. On définit une regex qui détecte le champ `trace_id` dans les logs, et on crée un lien vers Tempo avec ce traceId. Ainsi, chaque ligne de log affiche automatiquement un bouton "Voir la trace" qui ouvre directement le waterfall correspondant dans Tempo.
+
+![alt text](screenshots/loki-trace-id.png)
+
+#### Démarche d'investigation face à un pic d'erreurs
+
+On commence par Prometheus pour identifier le service concerné et la fenêtre de temps précise. La requête `rate(http_requests_total{status=~"5.."}[5m])` ventilée par `job` permet de voir lequel des services a déclenché le pic.
+
+Une fois le service identifié, on bascule sur Loki pour lire les logs d'erreur sur cette même fenêtre : `{job="task-service"} | json | level="error"`. Les logs Pino donnent le message d'erreur exact, la route concernée et souvent la stack trace — ce que la métrique seule ne dit pas.
+
+Enfin, on prend un `trace_id` visible dans les logs et on l'ouvre dans Tempo. Le waterfall montre exactement quelle étape a échoué dans la chaîne (api-gateway → task-service → postgres) et combien de temps chaque span a pris. Si l'erreur vient d'un timeout base de données, ça se voit immédiatement sur la durée du span `pg.query`.
