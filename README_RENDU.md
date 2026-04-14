@@ -98,7 +98,10 @@ tempo
 
 Tempo doit démarrer en premier car l'OTel Collector lui envoie des traces dès le lancement. Prometheus dépend du collector pour scraper ses métriques internes. Grafana attend Prometheus et Tempo pour que ses datasources soient disponibles.
 
-#### Persistance
+---
 
-- `prometheus_data` — volume nommé monté sur `/prometheus`, préserve les séries temporelles entre redémarrages
-- `grafana_data` — volume nommé monté sur `/var/lib/grafana`, préserve dashboards, préférences et sessions
+## B. Visualisation de l'application
+
+### Métriques métier
+
+Ajout des metrics customs dans chaque services.

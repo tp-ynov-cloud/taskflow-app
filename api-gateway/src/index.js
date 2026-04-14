@@ -1,5 +1,5 @@
 require("./tracing");
-const { register } = require("./metrics");
+const { register, upstreamErrorsTotal, httpRequestsTotal, httpRequestDurationMs } = require("./metrics");
 const express = require("express");
 const { createProxyMiddleware } = require("http-proxy-middleware");
 const pino = require("pino");
@@ -33,6 +33,19 @@ app.use(
   }),
 );
 
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    // Normalize to first two path segments to avoid high cardinality (/api/tasks/some-uuid → /api/tasks/:id)
+    const parts = req.path.split('/').filter(Boolean);
+    const route = '/' + parts.slice(0, 2).join('/');
+    const labels = { method: req.method, route, status: res.statusCode };
+    httpRequestsTotal.inc(labels);
+    httpRequestDurationMs.observe(labels, Date.now() - start);
+  });
+  next();
+});
+
 app.get("/health", (req, res) =>
   res.json({
     status: "ok",
@@ -58,6 +71,7 @@ app.use(
     on: {
       error: (err, req, res) => {
         logger.error({ err }, "user-service proxy error");
+        upstreamErrorsTotal.inc({ service: "user-service" });
         res.status(502).json({ error: "user-service unavailable" });
       },
     },
@@ -74,6 +88,7 @@ app.use(
     on: {
       error: (err, req, res) => {
         logger.error({ err }, "task-service proxy error");
+        upstreamErrorsTotal.inc({ service: "task-service" });
         res.status(502).json({ error: "task-service unavailable" });
       },
     },
@@ -90,6 +105,7 @@ app.use(
     on: {
       error: (err, req, res) => {
         logger.error({ err }, "notification-service proxy error");
+        upstreamErrorsTotal.inc({ service: "notification-service" });
         res.status(502).json({ error: "notification-service unavailable" });
       },
     },

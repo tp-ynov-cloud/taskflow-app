@@ -1,5 +1,5 @@
 require("./tracing");
-const { register } = require("./metrics");
+const { register, httpRequestsTotal, httpRequestDurationMs } = require("./metrics");
 const express = require("express");
 const pino = require("pino");
 const pinoHttp = require("pino-http");
@@ -12,6 +12,18 @@ const app = express();
 const ERROR_CODE = 400;
 
 app.use(express.json());
+
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const route = req.route?.path || req.path;
+    const labels = { method: req.method, route, status: res.statusCode };
+    httpRequestsTotal.inc(labels);
+    httpRequestDurationMs.observe(labels, Date.now() - start);
+  });
+  next();
+});
+
 app.use(
   pinoHttp({
     logger,
