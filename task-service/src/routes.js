@@ -1,7 +1,10 @@
 const express = require("express");
+const { trace } = require("@opentelemetry/api");
 const db = require("./db");
 const { publish } = require("./publisher");
 const { tasksCreatedTotal, tasksStatusChangesTotal, tasksGauge } = require("./metrics");
+
+const tracer = trace.getTracer("task-service");
 
 const router = express.Router();
 
@@ -78,11 +81,13 @@ router.post("/", async (req, res) => {
     );
     const task = result.rows[0];
 
+    const span = tracer.startSpan("publish.task.created");
     await publish("task.created", {
       taskId: task.id,
       title: task.title,
       assigneeId: task.assignee_id,
     });
+    span.end();
 
     tasksCreatedTotal.inc({ priority: task.priority });
     await refreshTasksGauge();

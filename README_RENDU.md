@@ -160,3 +160,26 @@ Chaque service produit ses propres spans, reliés par un **traceId commun** prop
 | `telemetry.sdk.name` | `opentelemetry` | SDK utilisé |
 | `telemetry.sdk.language` | `nodejs` | Langage |
 
+#### Ajout de spans custom
+
+L'auto-instrumentation couvre HTTP et PostgreSQL, mais pas Redis/pub-sub. Un span manuel est ajouté dans `task-service/src/routes.js` autour de la publication Redis :
+
+```js
+const { trace } = require("@opentelemetry/api");
+const tracer = trace.getTracer("task-service");
+
+const span = tracer.startSpan("publish.task.created");
+await publish("task.created", { taskId: task.id, title: task.title, assigneeId: task.assignee_id });
+span.end();
+```
+
+Ce span apparaît dans la trace distribuée entre le span `POST /tasks` (task-service) et la fin de la requête. Il permet de mesurer le temps passé à publier dans Redis et de l'isoler visuellement dans le waterfall.
+
+Dans Grafana > Explore > Tempo, on peut le retrouver avec la requête TraceQL :
+
+```traceql
+{ name = "publish.task.created" }
+```
+
+![alt text](screenshots/public-task-created.png)
+
