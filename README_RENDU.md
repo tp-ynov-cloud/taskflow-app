@@ -235,3 +235,11 @@ En revanche, sur `http://localhost:9090/targets`, Prometheus ne voit qu'une seul
 ![alt text](screenshots/3-k6-scale-error.png)
 
 **Question 8** — `docker scale` ne suffit pas en production pour plusieurs raisons. Il n'y a pas de service discovery : Prometheus et d'autres outils ne détectent pas automatiquement les nouvelles instances. Il n'y a pas de health check au niveau du load balancer : si un replica tombe, le trafic continue de lui être envoyé. Enfin, il n'y a aucune gestion du rolling update ou du rollback. Kubernetes résout ces problèmes avec des Deployments (scaling déclaratif avec health checks), un service discovery natif, et une intégration avec des outils comme Prometheus Operator qui détecte automatiquement les pods via des `ServiceMonitor`.
+
+## Étape 4 — Limites de l'instrumentation
+
+**Question 9** — Le panel affiche "No data" parce que les erreurs signalées par k6 ne sont pas des erreurs HTTP 5xx. Le check `tasks response < 500ms` échoue quand le serveur répond en plus de 500ms mais retourne quand même un 200 OK — Prometheus ne voit donc aucun status 5xx. Le panel ne peut pas détecter une dégradation de performance, seulement des erreurs applicatives. Une réponse lente reste invisible pour ce panel.
+
+**Question 10** — Le panel mesure la latence **à l'intérieur** du service, à partir du moment où Node.js accepte la connexion TCP. Sous forte charge, les requêtes font la queue au niveau de l'OS avant même d'atteindre Express, ce temps d'attente n'est jamais mesuré. k6 lui mesure la latence end-to-end depuis le client, connection comprise.
+
+C'est pour ça que k6 voit p95=2.45s alors que Grafana reste flat : Grafana ne voit que les requêtes qui ont déjà passé la file d'attente. Pour rectifier ça, il faudrait pousser les métriques k6 directement dans Prometheus via `k6 run --out experimental-prometheus-rw`, ou utiliser un Blackbox Exporter qui sonde les services depuis l'extérieur.
