@@ -105,3 +105,58 @@ Tempo doit démarrer en premier car l'OTel Collector lui envoie des traces dès 
 ### Métriques métier
 
 Ajout des metrics customs dans chaque services.
+
+### Traces
+
+#### Scénario : POST /api/tasks
+
+Requête émise depuis le frontend → api-gateway → task-service → PostgreSQL.
+
+Scénario de création d'une tâche.
+![scenario](screenshots/scenario.png)
+
+#### Chaîne de spans observée
+
+```
+api-gateway   POST /api/tasks
+  └── task-service   POST /tasks
+        └── pg   INSERT INTO taskflow
+```
+
+Chaque service produit ses propres spans, reliés par un **traceId commun** propagé via les headers HTTP (`traceparent`). L'auto-instrumentation OTel s'occupe de la propagation sans code supplémentaire.
+
+#### Attributs expliqués
+
+**Spans HTTP (instrumentation Express/HTTP)**
+
+| Attribut | Exemple | Description |
+|---|---|---|
+| `http.method` | `POST` | Méthode HTTP de la requête |
+| `http.route` | `/tasks` | Route Express matchée (pattern, pas l'URL réelle) |
+| `http.target` | `/tasks` | Path complet avec query string |
+| `http.status_code` | `201` | Code de réponse HTTP |
+| `http.url` | `http://task-service:3002/tasks` | URL complète côté client |
+| `net.peer.name` | `task-service` | Hôte cible du span client |
+| `span.kind` | `SERVER` / `CLIENT` | `SERVER` pour le service qui reçoit, `CLIENT` pour celui qui émet |
+
+**Spans PostgreSQL (instrumentation pg)**
+
+| Attribut | Exemple | Description |
+|---|---|---|
+| `db.system` | `postgresql` | Système de base de données |
+| `db.name` | `taskflow` | Nom de la base |
+| `db.statement` | `INSERT INTO tasks ...` | Requête SQL exécutée — utile pour détecter les N+1 ou les requêtes lentes |
+| `db.operation` | `INSERT` | Type d'opération |
+| `net.peer.name` | `postgres` | Hôte du serveur DB |
+| `net.peer.port` | `5432` | Port |
+
+![alt text](screenshots/scenario_span_database.png)
+
+**Attributs de ressource (communs à tous les spans d'un service)**
+
+| Attribut | Exemple | Description |
+|---|---|---|
+| `service.name` | `task-service` | Identifiant du service — défini dans `tracing.js` via `OTEL_SERVICE_NAME` |
+| `telemetry.sdk.name` | `opentelemetry` | SDK utilisé |
+| `telemetry.sdk.language` | `nodejs` | Langage |
+
