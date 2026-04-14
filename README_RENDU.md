@@ -189,3 +189,32 @@ On prend un `trace_id` visible dans les logs et on l'ouvre dans Tempo. Le waterf
 **Question 2** — `http_req_failed` est à 100%, il y a des erreurs 401, le token n'est pas transmis à la requête.
 
 ![alt text](screenshots/1-first-stress-test-error.png)
+
+
+## Étape 2 — Monter la charge progressivement
+
+**Question 3** — À 50 VUs (scénario par défaut), le check `tasks response < 500ms` ne faillit pas : p95 à 81.1ms, 0% d'échecs.
+
+![alt text](screenshots/2-k6-result-run.png)
+
+À 100 VUs, les checks passent encore. À 150 VUs, le check commence à échouer : 1352 échecs sur 1605 tentatives (14% d'échecs), avec une p95 globale à 2.79s. Le système est dégradé mais pas totalement saturé — 15% des GET tasks passent encore sous 500ms. À 200 VUs, le check s'effondre complètement : 0% de succès, p95 à 2.45s. Le seuil de rupture se situe donc autour de **150 VUs**.
+
+**Test avec 150 vus**
+![alt text](screenshots/2-k6-result-run-150-vus.png)
+
+**Test avec 200 vus**
+![alt text](screenshots/2-k6-result-run-200-vus.png)
+
+**Question 4** — À chaque itération, l'API Gateway reçoit un total de 4 requêtes, qui sont ensuite distribuées de la manière suivante :
+- 1 requête vers le user-service (POST login).
+- 2 requêtes vers le task-service (GET tasks et POST create task).
+- 1 requête vers le notification-service (GET notifications).
+
+*Répartition du trafic :*  
+Puisque l'API Gateway centralise ces 4 appels, elle supporte logiquement une charge plus lourde que les services individuels. Concrètement, elle reçoit :
+- 4 fois plus de trafic que le user-service ou le notification-service (qui n'en reçoivent qu'un seul chacun).
+- 2 fois plus de trafic que le task-service (qui en reçoit deux).
+
+![alt text](screenshots/2-first-stress-test.png)
+
+**Question 5** — Le `task-service` reçoit 2 requêtes par itération contre 1 pour les autres services, mais chacune de ces requêtes est coûteuse : le GET tasks fait un `SELECT` complet, le POST tasks fait un `INSERT` puis un `COUNT GROUP BY` pour la gauge, et déclenche une publication Redis.
