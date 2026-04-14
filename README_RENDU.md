@@ -1,3 +1,5 @@
+Arnaud Gaydamour - Elias El Oudghiri
+
 ## A. Instrumenter l'application
 
 ### SDK OpenTelemetry — `tracing.js`
