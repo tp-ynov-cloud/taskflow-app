@@ -218,3 +218,20 @@ Puisque l'API Gateway centralise ces 4 appels, elle supporte logiquement une cha
 ![alt text](screenshots/2-first-stress-test.png)
 
 **Question 5** — Le `task-service` reçoit 2 requêtes par itération contre 1 pour les autres services, mais chacune de ces requêtes est coûteuse : le GET tasks fait un `SELECT` complet, le POST tasks fait un `INSERT` puis un `COUNT GROUP BY` pour la gauge, et déclenche une publication Redis.
+
+
+## Étape 3 — Tester les limites de `docker scale`
+
+**Question 6** — `docker compose up --scale task-service=3` échoue avec une erreur de port déjà alloué. La cause est le mapping statique `"3002:3002"` dans `docker-compose.yml` : les 3 replicas essaient tous de binder le même port hôte 3002, ce qui est impossible. La fix est de supprimer les ports du task-service — Docker gère les ports internes seul, et l'api-gateway accède au service via le réseau Docker interne.
+
+![alt text](screenshots/scale-port-error.png)
+
+**Question 7** — Après le fix, les 3 replicas démarrent et reçoivent bien du trafic dans Grafana. Les checks passent mieux qu'avant : `tasks response < 500ms` monte à 36% de succès contre 15% avant le scaling, et la p95 tombe de 2.79s à 1.41s. Le scaling a donc amélioré les métriques.
+
+Cependant, de nouvelles erreurs apparaissent : 5 `create task 201` échoués et 35 `notifs response < 500ms` dépassés qui n'existaient pas avant. Avec 3 replicas, chacun maintient son propre pool de connexions PostgreSQL. À 150 VUs, les 3 replicas ouvrent des connexions en parallèle et peuvent atteindre la limite `max_connections` de Postgres (100 par défaut) — Postgres refuse alors de nouvelles connexions et le service retourne un 500. C'est une limite du scaling horizontal naïf : on scale l'applicatif mais la base reste un goulot partagé. En production on résoudrait ça avec un connection pooler comme PgBouncer.
+
+En revanche, sur `http://localhost:9090/targets`, Prometheus ne voit qu'une seule target `task-service` malgré les 3 replicas. Prometheus est configuré avec l'adresse statique `task-service:3002` dans `prometheus.yml` — Docker résout ce nom DNS vers l'un des replicas de façon aléatoire, Prometheus scrape donc toujours un seul container sans avoir connaissance des deux autres.
+
+![alt text](screenshots/3-k6-scale-error.png)
+
+**Question 8** — `docker scale` ne suffit pas en production pour plusieurs raisons. Il n'y a pas de service discovery : Prometheus et d'autres outils ne détectent pas automatiquement les nouvelles instances. Il n'y a pas de health check au niveau du load balancer : si un replica tombe, le trafic continue de lui être envoyé. Enfin, il n'y a aucune gestion du rolling update ou du rollback. Kubernetes résout ces problèmes avec des Deployments (scaling déclaratif avec health checks), un service discovery natif, et une intégration avec des outils comme Prometheus Operator qui détecte automatiquement les pods via des `ServiceMonitor`.
