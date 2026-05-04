@@ -1,14 +1,14 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg: #0f0f0f;
-  --surface: #1a1a1a;
-  --border: #2e2e2e;
-  --border-hover: #444;
-  --text: #e8e8e8;
-  --muted: #666;
-  --accent: #e8ff3d;
-  --accent-dim: rgba(232, 255, 61, 0.12);
+  --bg: #1a0f1f;
+  --surface: #2a1838;
+  --border: #3d2950;
+  --border-hover: #5a3d75;
+  --text: #f0e6f5;
+  --muted: #8e7099;
+  --accent: #ff4dd2;
+  --accent-dim: rgba(255, 77, 210, 0.12);
   --red: #ff4d4d;
   --green: #3dff8f;
   --blue: #3db8ff;
@@ -43,8 +43,8 @@ button {
   text-transform: uppercase;
 }
 button:hover { border-color: var(--accent); color: var(--accent); }
-button.primary { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 500; }
-button.primary:hover { background: #d4eb00; border-color: #d4eb00; color: #000; }
+button.primary { background: var(--accent); color: #1a0f1f; border-color: var(--accent); font-weight: 500; }
+button.primary:hover { background: #d63db0; border-color: #d63db0; color: #1a0f1f; }
 button.danger:hover { border-color: var(--red); color: var(--red); }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
 
