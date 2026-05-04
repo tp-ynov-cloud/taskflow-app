@@ -447,3 +447,39 @@ Deux fichiers créés dans `k8s/base/frontend/` :
 L'écart de ressources entre `api-gateway` (Node, CPU/mémoire modéré) et `frontend` (nginx, quasi rien) reflète directement la nature des deux services : exécution de logique vs. service de fichiers statiques.
 
 Après `kubectl apply -f k8s/base/api-gateway/ -f k8s/base/frontend/`, les 4 pods (`api-gateway` ×2, `frontend` ×2) passent en `1/1 Running`.
+
+---
+
+## Étape 8 — Vérifier que tout tourne
+
+```bash
+kubectl get all -n staging
+```
+
+Tous les pods sont attendus en `1/1 Running` :
+
+- `postgres-0` (StatefulSet, 1 replica)
+- `redis-*` (Deployment, 1 replica)
+- `user-service-*` ×2
+- `task-service-*` ×2
+- `notification-service-*` ×1 (cf. justification étape 5)
+- `api-gateway-*` ×2
+- `frontend-*` ×2
+
+Soit **11 pods** au total, répartis sur les workers `taskflow-worker` et `taskflow-worker2` par le scheduler.
+
+![alt text](screenshots/k8s-all-running.png)
+
+### Note sur les erreurs OTEL dans les logs
+
+```bash
+kubectl logs -n staging deployment/task-service
+```
+
+Les logs des services Node remontent des erreurs récurrentes du type :
+
+```
+Error: connect ECONNREFUSED otel-collector:4318
+```
+
+C'est attendu : la stack d'observabilité (OTel Collector, Tempo, Prometheus, Grafana, Loki) est définie dans `docker-compose.infra.yaml` et n'a pas été portée en manifests Kubernetes dans ce TP. L'instrumentation OTel des services tente de pousser les traces et métriques toutes les 10 secondes, échoue, et logue l'erreur — sans impact sur le traitement des requêtes HTTP. La porter sur k8s nécessiterait des manifests pour Tempo, Prometheus, Grafana et le Collector, plus une intégration via `ServiceMonitor` (Prometheus Operator) pour la découverte dynamique des targets.
