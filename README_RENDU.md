@@ -243,3 +243,71 @@ En revanche, sur `http://localhost:9090/targets`, Prometheus ne voit qu'une seul
 **Question 10** — Le panel mesure la latence **à l'intérieur** du service, à partir du moment où Node.js accepte la connexion TCP. Sous forte charge, les requêtes font la queue au niveau de l'OS avant même d'atteindre Express, ce temps d'attente n'est jamais mesuré. k6 lui mesure la latence end-to-end depuis le client, connection comprise.
 
 C'est pour ça que k6 voit p95=2.45s alors que Grafana reste flat : Grafana ne voit que les requêtes qui ont déjà passé la file d'attente. Pour rectifier ça, il faudrait pousser les métriques k6 directement dans Prometheus via `k6 run --out experimental-prometheus-rw`, ou utiliser un Blackbox Exporter qui sonde les services depuis l'extérieur.
+
+---
+
+# Partie 3 — Kubernetes
+
+## Étape 3 — Déploiement du `user-service`
+
+### Diagnostic du `ImagePullBackOff`
+
+**Question 1** — Après `kubectl apply -f k8s/base/user-service/`, le Terminal A affiche les pods en `ImagePullBackOff` au lieu de `1/1 Running`. Pour diagnostiquer, on regarde la section Events du pod :
+
+```bash
+kubectl describe pod -l app=user-service -n staging
+```
+
+Dans Events, Kubernetes remonte un message du type :
+
+```
+Failed to pull image "mageas/taskflow-user-service:v0.0.1":
+  rpc error: code = NotFound desc = failed to pull and unpack image:
+  failed to resolve reference: not found
+Warning  Failed     ErrImagePull
+Warning  Failed     ImagePullBackOff
+```
+
+Kubernetes nous dit donc explicitement qu'il n'arrive pas à trouver l'image sur le registry distant — le tag `v0.0.1` du repo `mageas/taskflow-user-service` n'existe pas (ou n'est pas accessible). Je n'avait pas push l'image en arm.
+
+---
+
+**Question 2** — La différence majeure avec le déploiement Docker Compose des TPs précédents : en Compose, la directive `build: ./user-service` construit l'image **localement** sur le daemon Docker de la machine, qui sert ensuite directement le conteneur. Aucun pull n'est nécessaire.
+
+Sur kind, les nœuds du cluster tournent dans des conteneurs Docker isolés avec leur propre runtime containerd. Ils ne voient pas le daemon Docker local — l'image **doit donc venir d'un registry distant** (Docker Hub) ou être chargée explicitement dans le cluster. Ce qui manque concrètement, c'est que le tag `v0.0.1` n'a jamais été publié : le workflow `release.yml` ne se déclenche que sur `git push tag v*.*.*`, et aucun tag n'a été poussé depuis mon fork.
+
+### Correction
+
+Pour publier l'image sur mon propre Docker Hub, puis adapter `k8s/base/user-service/deployment.yaml` :
+
+```bash
+git tag v0.0.3
+git push origin v0.0.3
+```
+
+```yaml
+image: mageas/taskflow-user-service:v0.0.3-arm64
+```
+
+Avec en complément `imagePullPolicy: IfNotPresent` (déjà présent dans le manifest) pour que le kubelet ne tente pas de re-pull depuis Docker Hub.
+
+Il faut aussi ajouter les secrets avec :
+```bash
+kubectl create secret generic postgres-secret -n staging \
+  --from-literal=POSTGRES_USER=admin \
+  --from-literal=POSTGRES_PASSWORD=admin \
+  --from-literal=POSTGRES_DB=taskflow \
+  --from-literal=DATABASE_URL='postgresql://admin:admin@postgres:5432/taskflow' \
+  --from-literal=JWT_SECRET='change-me-in-prod'
+```
+
+Après application, les pods passent en `1/1 Running` :
+
+```bash
+kubectl get pods -n staging -o wide
+NAME                            READY   STATUS    RESTARTS   AGE   NODE
+user-service-6fd54dcb6b-4dh8p    1/1     Running   0          12s   taskflow-worker
+user-service-6fd54dcb6b-5bzmv    1/1     Running   0          12s   taskflow-worker2
+```
+
+![alt text](screenshots/k8s-user-service-running.png)
