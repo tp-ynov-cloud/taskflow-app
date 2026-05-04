@@ -483,3 +483,160 @@ Error: connect ECONNREFUSED otel-collector:4318
 ```
 
 C'est attendu : la stack d'observabilité (OTel Collector, Tempo, Prometheus, Grafana, Loki) est définie dans `docker-compose.infra.yaml` et n'a pas été portée en manifests Kubernetes dans ce TP. L'instrumentation OTel des services tente de pousser les traces et métriques toutes les 10 secondes, échoue, et logue l'erreur — sans impact sur le traitement des requêtes HTTP. La porter sur k8s nécessiterait des manifests pour Tempo, Prometheus, Grafana et le Collector, plus une intégration via `ServiceMonitor` (Prometheus Operator) pour la découverte dynamique des targets.
+
+---
+
+## Partie 2 — Exposer avec un Ingress
+
+### Inscription depuis l'interface
+
+**Question 1 — Est-ce que l'inscription fonctionne ?**
+
+Non. Le formulaire échoue avec une erreur 500 côté front : le `POST /api/users/register` retourne une erreur serveur.
+
+**Question 2 — Remontée des logs et accès à PostgreSQL**
+
+Investigation en remontant la chaîne. D'abord l'`api-gateway` :
+
+```bash
+kubectl logs -n staging deployment/api-gateway --tail=50
+```
+
+Aucune trace du `register` côté gateway, seulement les `/health` des probes. Le proxy ne logue pas les requêtes réussies au niveau info — il forward et c'est tout. On descend au `user-service` (avec `-l` pour agréger les 2 replicas) :
+
+```bash
+kubectl logs -n staging -l app=user-service --tail=200 | grep -iE "error|register"
+```
+
+On y trouve bien le `POST /users/register` mais avec une erreur peu informative :
+
+```json
+{
+  "level": 50,
+  "req": { "method": "POST", "url": "/users/register", ... },
+  "res": { "statusCode": 500 },
+  "err": { "type": "Error", "message": "failed with status code 500" },
+  "msg": "request failed : failed with status code 500"
+}
+```
+
+C'est pino-http qui logue génériquement le 500 — l'erreur SQL réelle n'apparaît pas. En relisant `user-service/src/routes.js`, on comprend pourquoi :
+
+```js
+} catch (err) {
+  if (err.code === '23505') return res.status(409).json({ error: 'Email already exists' });
+  res.status(500).json({ error: 'Internal server error' });  // err jamais loggué
+}
+```
+
+Le `catch` swallow l'erreur sans la logger. Pour voir la cause réelle, il faut inspecter directement la base. Le Service `postgres:5432` est ClusterIP, donc inaccessible depuis l'hôte — on ouvre un port-forward :
+
+```bash
+kubectl port-forward -n staging svc/postgres 5432:5432
+```
+
+Puis `psql` depuis la machine :
+
+```bash
+PGPASSWORD=admin psql -h localhost -U admin -d taskflow -c "\dt"
+```
+
+Résultat : `Did not find any relations.` Aucune table dans la base. L'`INSERT INTO users` du register tape sur une table qui n'existe pas — d'où le 500.
+
+**Question 3 — Comparaison avec `docker-compose.yaml`**
+
+Dans `docker-compose.yml`, le service postgres monte explicitement le script d'init :
+
+```yaml
+volumes:
+  - postgres_data:/var/lib/postgresql/data
+  - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+```
+
+Le bind mount `./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql` exploite une convention de l'image officielle `postgres` : tout fichier `*.sql` ou `*.sh` placé dans `/docker-entrypoint-initdb.d/` est exécuté **au premier démarrage** quand le data directory est vide. C'est ce qui crée les tables `users`, `tasks`, `notifications` et insère Alice et Bob.
+
+Mon StatefulSet d'origine ne montait que le PVC pour les données, **pas le script d'init**. Conséquence : la base démarre vide, schéma absent, register en erreur 500.
+
+### Correction
+
+Création d'un ConfigMap `postgres-init` qui contient le contenu de `scripts/init.sql`, puis montage dans le pod au chemin attendu par l'image officielle :
+
+`k8s/base/postgres/init-configmap.yaml` :
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: staging
+data:
+  init.sql: |
+    CREATE TABLE IF NOT EXISTS users (...);
+    CREATE TABLE IF NOT EXISTS tasks (...);
+    CREATE TABLE IF NOT EXISTS notifications (...);
+```
+
+Mise à jour du `statefulset.yaml` :
+
+```yaml
+volumeMounts:
+  - name: postgres-data
+    mountPath: /var/lib/postgresql/data
+    subPath: pgdata
+  - name: postgres-init
+    mountPath: /docker-entrypoint-initdb.d
+volumes:
+  - name: postgres-init
+    configMap:
+      name: postgres-init
+```
+
+⚠️ **Important** : `/docker-entrypoint-initdb.d/` n'est exécuté que si le data directory est vide. Comme le PVC contient déjà des données du premier démarrage, il faut le supprimer pour que l'init re-tourne :
+
+```bash
+kubectl delete -f k8s/base/postgres/
+kubectl delete pvc -n staging postgres-data-postgres-0
+kubectl apply -f k8s/base/postgres/
+```
+
+Après recréation, `\dt` montre les 3 tables, et l'inscription depuis l'interface réussit.
+
+### Service vs Ingress
+
+**Question 1 — Pourquoi `localhost:5432` ne fonctionne pas sans port-forward ?**
+
+Le Service `postgres` est de type `ClusterIP` (le défaut). Un ClusterIP attribue une IP virtuelle **uniquement routable à l'intérieur du cluster** — kube-proxy crée des règles iptables/IPVS sur chaque nœud pour rediriger cette IP vers les endpoints des pods. Cette IP n'est pas exposée sur l'hôte de la machine.
+
+Par ailleurs, le mapping `extraPortMappings` de kind ne forward sur l'hôte que les ports 80/443 du `taskflow-control-plane` (pour l'Ingress). Aucun mapping n'a été défini pour le 5432, et même si on en ajoutait un, ça ne résoudrait pas vers le Service Postgres — kind n'expose que les ports en `NodePort` ou via l'Ingress controller.
+
+`kubectl port-forward svc/postgres 5432:5432` contourne tout ça : kubectl ouvre un tunnel TCP local-vers-cluster via l'API Server, qui se charge de relayer le trafic au pod cible. C'est pratique pour du debug ponctuel, pas une solution à laisser tourner en prod.
+
+**Question 2 — Qui fait le routage HTTP décrit par l'Ingress ?**
+
+L'objet `Ingress` lui-même n'est qu'**une déclaration de routage** — un manifest YAML stocké dans etcd. Sans contrôleur pour le lire, il ne fait strictement rien.
+
+Le routage est effectivement assuré par l'**ingress-nginx-controller**, déployé via :
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+```
+
+Ce manifest crée un Deployment dans le namespace `ingress-nginx` qui contient un binaire NGINX + un agent Go (le controller) qui watch l'API Kubernetes. Quand un objet `Ingress` est créé/modifié, le controller le traduit en blocs `server { ... location /api { proxy_pass ... } }` dans la conf NGINX et la recharge à chaud.
+
+Pour qu'il soit joignable depuis l'hôte, on l'a forcé à se scheduler sur `taskflow-control-plane` (`nodeSelector: ingress-ready: "true"`) — seul nœud où kind a configuré `extraPortMappings` pour exposer 80/443 sur la machine. C'est NGINX qui reçoit chaque requête sur `localhost:80`, lit le path et la forwarde au Service approprié.
+
+**Question 3 — Qui load-balance entre les replicas de `task-service` ?**
+
+Ce n'est **ni l'Ingress ni le controller NGINX** : c'est le **Service ClusterIP** `task-service` lui-même, via **kube-proxy**.
+
+Le flow concret pour une requête `GET /api/tasks` :
+
+1. Le client tape `http://localhost/api/tasks` → kind forward le port 80 vers le pod `ingress-nginx-controller`.
+2. NGINX matche la règle `/api` dans le manifest `Ingress` → il proxy vers `api-gateway:3000` (nom DNS du Service).
+3. CoreDNS résout `api-gateway` en l'IP virtuelle ClusterIP du Service.
+4. **kube-proxy** intercepte la connexion sur cette IP via ses règles iptables et la redirige vers **un pod au hasard** parmi les endpoints du Service (round-robin / random selon le mode).
+5. L'`api-gateway` valide le JWT puis appelle `http://task-service:3002/tasks` — même mécanisme : CoreDNS → ClusterIP → kube-proxy → un des 2 replicas `task-service`.
+
+Le load balancing se fait donc à **chaque saut de Service**, au niveau L4 (TCP), par kube-proxy. NGINX ne sait même pas que le `task-service` a 2 replicas — il ne voit que l'IP virtuelle du Service `api-gateway`.
+
+**Implication sur le rôle de l'Ingress** : l'Ingress n'est **pas un load balancer applicatif**, c'est un **routeur HTTP L7 d'entrée** (host/path → Service). Le vrai load balancing inter-replicas est délégué aux Services. C'est aussi pour ça que dans cette stack, retirer l'Ingress ne casserait pas la communication interne entre services — seul l'accès depuis l'extérieur disparaîtrait.
