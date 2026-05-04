@@ -355,3 +355,34 @@ Les autres services sont stateless et conviennent parfaitement à un Deployment 
 - `notification-service` : worker pub/sub sans état persistant local (l'abonnement Redis se reconstruit au démarrage).
 - `api-gateway` : proxy HTTP, aucun état entre requêtes.
 - `frontend` : nginx servant des fichiers statiques compilés, totalement immuable.
+
+---
+
+## Étape 5 — Déployer le `task-service` et le `notification-service`
+
+Les 6 fichiers ont été créés en s'appuyant sur le pattern du `user-service` :
+
+- `k8s/base/task-service/` : ConfigMap (PORT 3002, REDIS_URL, OTEL), Deployment (image `taskflow-task-service`, probes `/health`, secret `postgres-secret` pour `DATABASE_URL` et `JWT_SECRET`), Service ClusterIP sur 3002.
+- `k8s/base/notification-service/` : ConfigMap (PORT 3003, REDIS_URL, OTEL), Deployment (image `taskflow-notification-service`, probes `/health`, **pas de DATABASE_URL** car le service stocke ses notifications en mémoire), Service ClusterIP sur 3003.
+
+Après `kubectl apply -f k8s/base/task-service/ -f k8s/base/notification-service/`, tous les pods passent en `1/1 Running`.
+
+### Choix du nombre de replicas
+
+**Question 1 — Comment le `notification-service` consomme-t-il les événements Redis ?**
+
+Dans `notification-service/src/subscriber.js`, le service utilise l'API **Pub/Sub native de Redis** : `subscriber.subscribe('task.created', callback)` et `subscriber.subscribe('task.status_changed', callback)`. Chaque instance ouvre sa propre connexion Redis et s'abonne aux deux canaux. Les notifications produites sont stockées dans un **tableau en mémoire** (`const notifications = []`), pas dans une base partagée.
+
+**Question 2 — Implication sur le nombre de replicas ?**
+
+Le Pub/Sub Redis est un broadcast : **tout subscriber abonné à un canal reçoit une copie de chaque message publié**. Contrairement à un Redis Stream avec consumer group (où Redis distribue les messages entre consommateurs), il n'y a aucune répartition de charge.
+
+Concrètement, si on déploie 2 replicas du `notification-service`, chaque `task.created` publié par le `task-service` est livré aux **2 replicas en parallèle** : la notification est stockée 2 fois (dans deux tableaux en mémoire distincts), et la métrique `notifications_sent_total` est incrémentée 2 fois. À la lecture, le client appelle un seul replica au hasard via le Service ClusterIP et obtient une vue partielle des notifications selon celui qu'il a touché.
+
+**Question 3 — Justification**
+
+Le `notification-service` est donc fixé à **`replicas: 1`**. Tant que les notifications restent stockées en mémoire et que le pub/sub Redis est utilisé sans consumer group, scaler horizontalement crée des doublons et casse la lecture. Pour pouvoir scaler, il faudrait soit migrer vers Redis Streams + consumer group (un seul replica traite chaque message), soit persister les notifications dans une base partagée (Postgres) pour que chaque replica voie le même état.
+
+Les autres services sont eux scalables sans souci :
+- `task-service` reste à `replicas: 2` : c'est un service HTTP stateless, l'état est dans Postgres et la publication Redis est un fire-and-forget côté producer (aucune duplication possible côté publisher).
+- `user-service` reste à `replicas: 2` pour les mêmes raisons.

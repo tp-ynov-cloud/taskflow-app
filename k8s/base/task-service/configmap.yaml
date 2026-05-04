@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: task-service-cm
+  namespace: staging
+data:
+  PORT: "3002"
+  LOG_LEVEL: "info"
+  REDIS_URL: "redis://redis:6379"
+  OTEL_SERVICE_NAME: "task-service"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
