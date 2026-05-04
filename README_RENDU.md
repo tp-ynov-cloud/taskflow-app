@@ -386,3 +386,29 @@ Le `notification-service` est donc fixé à **`replicas: 1`**. Tant que les noti
 Les autres services sont eux scalables sans souci :
 - `task-service` reste à `replicas: 2` : c'est un service HTTP stateless, l'état est dans Postgres et la publication Redis est un fire-and-forget côté producer (aucune duplication possible côté publisher).
 - `user-service` reste à `replicas: 2` pour les mêmes raisons.
+
+---
+
+## Étape 6 — Déployer Redis (Deployment)
+
+Les deux fichiers `k8s/base/redis/` ont été complétés : Deployment 1 replica avec l'image `redis:7-alpine` sur le port 6379, et Service ClusterIP sur 6379.
+
+### Choix d'un Deployment plutôt qu'un StatefulSet
+
+Cohérent avec la justification de l'étape 4 (question 3) : en staging on tolère la perte des données Redis au redémarrage. Le pub/sub Redis est un broadcast en mémoire, sans persistance par défaut — un message non livré au moment de la publication est perdu de toute façon. Pas de volume → pas besoin de l'identité stable d'un StatefulSet.
+
+### Adaptation de la `readinessProbe`
+
+Redis n'expose pas d'endpoint HTTP `/health` comme les services Node : c'est un serveur TCP qui parle le protocole RESP. La probe utilise donc un `exec` qui lance `redis-cli ping` dans le conteneur — Redis répond `PONG` quand il est prêt à accepter des connexions, ce qui valide à la fois que le process est démarré et qu'il a fini son chargement initial.
+
+```yaml
+readinessProbe:
+  exec:
+    command: ["redis-cli", "ping"]
+  initialDelaySeconds: 5
+  periodSeconds: 10
+```
+
+Une alternative aurait été un `tcpSocket` sur le port 6379 — plus léger mais moins précis : il valide que le port est ouvert sans vérifier que Redis répond effectivement aux commandes.
+
+Après `kubectl apply -f k8s/base/redis/`, le pod Redis passe en `1/1 Running` et le `notification-service` peut s'abonner aux canaux `task.created` et `task.status_changed` via le DNS interne `redis:6379`.
