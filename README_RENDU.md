@@ -640,3 +640,29 @@ Le flow concret pour une requête `GET /api/tasks` :
 Le load balancing se fait donc à **chaque saut de Service**, au niveau L4 (TCP), par kube-proxy. NGINX ne sait même pas que le `task-service` a 2 replicas — il ne voit que l'IP virtuelle du Service `api-gateway`.
 
 **Implication sur le rôle de l'Ingress** : l'Ingress n'est **pas un load balancer applicatif**, c'est un **routeur HTTP L7 d'entrée** (host/path → Service). Le vrai load balancing inter-replicas est délégué aux Services. C'est aussi pour ça que dans cette stack, retirer l'Ingress ne casserait pas la communication interne entre services — seul l'accès depuis l'extérieur disparaîtrait.
+
+---
+
+## Partie 3 — Scénarios d'observation
+
+### Scénario 1 — Self-healing
+
+```bash
+kubectl delete pod -n staging -l app=task-service
+```
+
+Dans le Terminal A, on observe en temps réel :
+
+1. Les 2 pods `task-service-*` passent en `Terminating`.
+2. Quasi instantanément, 2 nouveaux pods `task-service-*` (avec un nouveau hash) apparaissent en `Pending`, puis `ContainerCreating`, puis `Running` une fois la readiness probe verte.
+3. Quelques secondes plus tard, l'état stable est rétabli : 2 pods `task-service` en `1/1 Running`, mais avec un `AGE` très récent (31s sur le screenshot) comparé aux autres services restés intacts (9m+).
+
+![alt text](screenshots/k8s-self-healing.png)
+
+**Pourquoi Kubernetes recrée les Pods ?**
+
+C'est le rôle du **Deployment controller** combiné au **ReplicaSet** sous-jacent. Le Deployment `task-service` déclare `replicas: 2` — c'est un **état désiré** stocké dans etcd, pas une commande one-shot. Le contrôleur tourne en boucle (reconciliation loop) et compare en permanence l'état réel (combien de pods avec le label `app=task-service` sont `Running`) à l'état désiré (2).
+
+Quand on supprime les pods avec `kubectl delete`, le ReplicaSet détecte immédiatement qu'il manque 2 pods par rapport à la spec, et en crée 2 nouveaux pour réconcilier. C'est le principe **declarative + control loop** au cœur de Kubernetes : on ne dit pas "fais X", on dit "voici l'état que je veux", et un contrôleur s'occupe de faire converger la réalité vers cette cible.
+
+C'est aussi ce qui explique le **self-healing automatique en cas de crash** : si un pod plante (OOMKilled, segfault, exit 1, nœud qui tombe), le même mécanisme le recrée sans intervention humaine. Le seul cas où l'auto-recovery échoue est si la spec elle-même est invalide (image inexistante, `requests` qu'aucun nœud ne peut satisfaire, etc.) — d'où l'intérêt de monitorer la colonne `READY` pour détecter ces cas.
