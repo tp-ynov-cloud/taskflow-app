@@ -752,3 +752,117 @@ Concrètement :
 - Pendant les fenêtres `Running`, la readiness sur `/health` (intacte) repasse vert quelques secondes → le pod réintègre les endpoints → reçoit du trafic → est tué au check suivant → le client voit une connexion abruptement coupée.
 
 À retenir : **un mauvais path sur la readiness dégrade silencieusement l'app** (les pods sont juste hors-jeu, on peut investiguer tranquillement). **Un mauvais path sur la liveness** met les pods en `CrashLoopBackOff` permanent — c'est plus visible mais beaucoup plus brutal pour l'utilisateur. C'est aussi pour ça qu'on configure typiquement la liveness avec des seuils plus tolérants que la readiness (`failureThreshold` plus élevé, `initialDelaySeconds` plus long).
+
+
+### Scénario 3 — Rolling update
+
+**Que voyez-vous dans la colonne `CHANGE-CAUSE` ? Est-ce utile ?**
+
+```bash
+kubectl rollout history -n staging deployment/frontend
+```
+
+La colonne affiche `<none>` pour toutes les révisions. C'est **inutile en l'état** : sans annotation, l'historique me dit juste qu'il y a eu N rollouts, pas pourquoi ni vers quoi. Impossible de savoir lequel correspond au passage en `v0.0.4-arm64` (thème rose/violet) sans aller checker manuellement le tag d'image de chaque ReplicaSet sous-jacent.
+
+![alt text](screenshots/k8s-rollout-history.png)
+
+Ça devient utile uniquement si on annote chaque déploiement, comme proposé dans le TP :
+
+```bash
+kubectl annotate deployment/frontend -n staging \
+  kubernetes.io/change-cause="passage à v0.0.4 - thème rose/violet"
+```
+![alt text](screenshots/k8s-rollout-history-2.png)
+![alt text](screenshots/k8s-rollout-history-theme.png)
+
+
+Le `kubectl rollout undo` s'est exécuté sans souci : on retombe sur la révision précédente (thème noir/jaune) et l'historique remet à jour les numéros de révision.
+
+![alt text](screenshots/k8s-rollout-history-rollback.png)
+
+### Questions rolling update
+
+**Question 1 — Pendant le rolling update, le nombre de pods disponibles a-t-il diminué ? Pourquoi ?**
+
+Non. La stratégie par défaut d'un Deployment est `RollingUpdate` avec `maxSurge: 25%` et `maxUnavailable: 25%`. Avec `replicas: 2`, ça arrondit à : on peut avoir **jusqu'à 3 pods en vol** (2 + 1 surge) et **au moins 1 pod toujours disponible** pendant la transition.
+
+Concrètement, dans le Terminal A on a vu un troisième pod `frontend-*` apparaître en `Pending` → `ContainerCreating` → `Running 1/1` (nouveau hash, nouvelle image). Ce n'est qu'**après** que sa readiness probe ait passé que Kubernetes a marqué un ancien pod en `Terminating`. Du point de vue du Service, il y a toujours eu au moins 2 endpoints prêts — aucune coupure côté utilisateur.
+
+C'est exactement ce que la readiness probe garantit : tant que le nouveau pod ne répond pas `200` sur `/`, il n'est pas inclus dans les endpoints, et l'ancien continue de servir.
+
+**Question 2 — Que se serait-il passé si le nouveau pod n'était jamais passé en `1/1` ?**
+
+Le rollout se serait **bloqué proprement, sans casser la prod**. Kubernetes refuse de retirer l'ancien pod tant que le nouveau n'est pas prêt (c'est la garantie `maxUnavailable`). Donc :
+
+- Le nouveau pod resterait en `0/1 Running`, en boucle de probe failed.
+- Aucun ancien pod ne serait terminé → les 2 anciens replicas continueraient à servir tout le trafic.
+- `kubectl rollout status deployment/frontend` afficherait `Waiting for deployment "frontend" rollout to finish: 1 of 2 updated replicas are available...` indéfiniment.
+- Au bout du `progressDeadlineSeconds` (600s par défaut), le Deployment passerait en `Progressing: False, reason: ProgressDeadlineExceeded` — visible avec `kubectl describe`. C'est un signal pour la CI/CD ou un opérateur humain.
+
+À ce stade, soit on diagnostique (logs du nouveau pod, image cassée ?), soit on `kubectl rollout undo` pour annuler.
+
+**Question 3 — Pourquoi annoter les révisions est-il important en équipe ?**
+
+Sans annotation, `rollout history` n'est qu'une liste de numéros opaques (`REVISION 1, 2, 3` avec `CHANGE-CAUSE: <none>`). En équipe ça pose plusieurs problèmes :
+
+- **Post-mortem impossible à chaud** : "le rollout 14h32 a cassé la prod, on rollback vers laquelle ?" — sans CHANGE-CAUSE on doit chercher le tag d'image correspondant en fouillant `kubectl get rs -o yaml`.
+- **Pas de traçabilité humaine** : un déploiement n'est pas qu'un changement d'image, c'est aussi un contexte (ticket Jira, hotfix, feature flag activé). Sans annotation, ce contexte vit ailleurs (Slack, mémoire) et se perd.
+- **Onboarding** : un nouveau membre qui regarde l'historique d'un Deployment ne voit aucune information utile, alors qu'avec des `change-cause` propres il a un journal de bord.
+- **Rollback ciblé** : `kubectl rollout undo --to-revision=N` exige de savoir laquelle est la bonne. Sans annotation, c'est de la divination.
+
+L'idéal en équipe est d'automatiser l'annotation depuis la CI : à chaque `kubectl apply`, le pipeline ajoute `kubernetes.io/change-cause="<commit-sha> <pr-title> by <author>"`.
+
+**Question 4 — `kubectl rollout undo` est-il suffisant comme stratégie de rollback en production ?**
+
+Non, ça reste un dépannage à la main. Limites principales :
+
+- **Limité à l'historique mémorisé** : `revisionHistoryLimit` (10 par défaut) — au-delà, les anciens ReplicaSets sont supprimés. Impossible de rollback vers une version trop ancienne.
+- **Ne couvre que le manifest du Deployment** : si la nouvelle version a fait une migration de schéma DB destructive, `rollout undo` ramène l'ancienne image mais pas le schéma. L'app cassera autrement (colonne supprimée, type changé, etc.). Idem pour ConfigMap/Secret modifiés en parallèle.
+- **Pas de test automatisé du rollback** : on présume que la version N-1 fonctionne encore, mais elle peut avoir une dépendance qui n'existe plus (API tierce dépréciée, message Kafka avec nouveau format, etc.).
+- **Action manuelle, pas d'audit trail** : qui a rollback, à quelle heure, pourquoi ? Pas de trace structurée.
+- **Granularité limitée** : on rollback **tout le Deployment**, pas une feature précise. Si un seul endpoint bug, on annule aussi les corrections de bugs livrées dans la même release.
+
+En production sérieuse, `rollout undo` est plutôt le dernier recours d'un humain en pleine incident. Les pratiques préférables :
+
+- **Feature flags** (LaunchDarkly, Unleash) pour désactiver une fonctionnalité sans toucher au déploiement.
+- **Canary / Blue-Green** (Argo Rollouts, Flagger) pour valider la nouvelle version sur un % du trafic avant de basculer, avec rollback automatique sur métriques (taux d'erreur, latence).
+- **GitOps** (ArgoCD, Flux) où l'état désiré est dans Git : le rollback c'est `git revert` du commit puis re-sync — auditable, reproductible, et visible par toute l'équipe.
+- **Migrations DB compatibles ascendant/descendant** (expand-then-contract) pour qu'un rollback applicatif n'invalide pas le schéma.
+
+---
+
+## Réflexion théorique — duplication dans les manifests
+
+**Question — Identifier au moins 3 valeurs répétées dans plusieurs fichiers, et impact d'un changement pour un déploiement en production**
+
+En relisant les ~20 manifests de `k8s/base/`, plusieurs valeurs reviennent systématiquement :
+
+1. **`namespace: staging`** — présent dans **tous** les manifests (Deployment, Service, ConfigMap, Secret, StatefulSet, Ingress) — environ 20 occurrences. Pour passer en `production`, il faudrait changer chaque fichier un par un.
+2. **Le tag d'image `v0.0.4-arm64`** — répété dans chaque `deployment.yaml` (5 services applicatifs). Une bump de version Docker oblige à modifier 5 fichiers et à éviter les oublis (un service oublié = version désynchronisée en prod).
+3. **Les URLs internes des services** — `http://user-service:3001`, `http://task-service:3002`, `http://notification-service:3003`, `http://otel-collector:4318` apparaissent dans `api-gateway-cm.yaml`, `task-service-cm.yaml`, `notification-service-cm.yaml`, etc. Si un port change ou si un service est renommé, c'est multi-fichier.
+4. **Les labels `app: <service>`** — dupliqués 3 fois par service (selector du Deployment + labels du template + selector du Service). Une faute de frappe et le Service ne route plus rien.
+5. **Le nom `postgres-secret`** — référencé depuis `user-service`, `task-service`, `api-gateway` pour `DATABASE_URL` et `JWT_SECRET`.
+6. **Les blocs `resources` (requests/limits) et `probes`** — quasi identiques entre `user-service`, `task-service`, `api-gateway` (image Node, port 3001/3002/3000).
+
+### Impact concret pour un déploiement en production
+
+Imaginons qu'on veuille créer un environnement `production` à côté de `staging`. Il faudrait :
+
+- **Dupliquer l'arborescence `k8s/base/` en `k8s/production/`** — soit ~20 fichiers copiés-collés.
+- **Faire un find/replace `staging` → `production`** dans chaque fichier. Risque : oublier un namespace dans un manifest, et ce manifest s'applique au mauvais cluster (ou pire, ne s'applique nulle part et passe inaperçu).
+- **Changer le tag d'image dans chaque Deployment** — typiquement la prod ne tourne pas la même version que la staging (staging = `v0.0.5`, prod = `v0.0.4` stable).
+- **Adapter les ressources** (la prod a probablement plus de CPU/mémoire, plus de replicas, des `resources.limits` plus généreux).
+- **Adapter le `host` de l'Ingress** (`localhost` en dev, `taskflow.exemple.com` en prod), ajouter du TLS, etc.
+- **Gérer les secrets différemment** — pas le même `JWT_SECRET` ni la même URL Postgres entre staging et prod, donc les `Secret` doivent être par environnement.
+
+À chaque modification d'une valeur "structurelle" (port d'un service, nom d'image, namespace), c'est un risque d'oubli ou de désynchronisation entre les environnements. Le test "j'ai changé le port du `task-service` de 3002 à 8080" implique de chercher dans **tous** les fichiers où `3002` apparaît (configmap du task-service, service du task-service, configmap de l'api-gateway, prometheus.yml, etc.) et de les modifier à la main.
+
+### Pourquoi ça motive Helm (ou Kustomize)
+
+C'est exactement ce que la dernière phrase de l'objectif du TP annonçait : *"ressentir la répétition qui motive Helm"*. Les outils existants pour résoudre ça :
+
+- **Kustomize** (intégré à `kubectl`) : on garde les manifests `k8s/base/` tels quels, et on crée des **overlays** (`k8s/overlays/staging/`, `k8s/overlays/production/`) qui ne contiennent que les **patches** par environnement (namespace, replicas, image, ressources). Avantage : pas de templating, du YAML pur.
+- **Helm** : un chart paramétré par un `values.yaml` par environnement (`values-staging.yaml`, `values-production.yaml`). Le namespace, le tag d'image, les replicas, etc. deviennent des `{{ .Values.namespace }}`. Avantage : packaging réutilisable, versioning de releases, hooks de migration.
+- **GitOps + ArgoCD** : on combine généralement Kustomize ou Helm avec un outil de sync continu qui applique automatiquement l'état désiré du repo Git vers le cluster cible.
+
+Concrètement, après avoir écrit ces 20 fichiers à la main, on comprend pourquoi aucune équipe sérieuse ne maintient des manifests Kubernetes "raw" en production multi-environnement.

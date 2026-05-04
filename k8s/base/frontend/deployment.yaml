@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: mageas/taskflow-frontend:v0.0.3-arm64
+          image: mageas/taskflow-frontend:v0.0.4-arm64
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
