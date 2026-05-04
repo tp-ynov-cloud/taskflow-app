@@ -666,3 +666,89 @@ C'est le rôle du **Deployment controller** combiné au **ReplicaSet** sous-jace
 Quand on supprime les pods avec `kubectl delete`, le ReplicaSet détecte immédiatement qu'il manque 2 pods par rapport à la spec, et en crée 2 nouveaux pour réconcilier. C'est le principe **declarative + control loop** au cœur de Kubernetes : on ne dit pas "fais X", on dit "voici l'état que je veux", et un contrôleur s'occupe de faire converger la réalité vers cette cible.
 
 C'est aussi ce qui explique le **self-healing automatique en cas de crash** : si un pod plante (OOMKilled, segfault, exit 1, nœud qui tombe), le même mécanisme le recrée sans intervention humaine. Le seul cas où l'auto-recovery échoue est si la spec elle-même est invalide (image inexistante, `requests` qu'aucun nœud ne peut satisfaire, etc.) — d'où l'intérêt de monitorer la colonne `READY` pour détecter ces cas.
+
+### Scénario 2 — Readiness probe
+
+Modification du `k8s/base/task-service/deployment.yaml` avec un path inexistant, puis recréation du cluster from scratch :
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /does-not-exist
+    port: 3002
+```
+
+```bash
+kind delete cluster --name taskflow
+kind create cluster --name taskflow --config k8s/kind-config.yaml
+kubectl create namespace staging
+kubectl apply -f k8s/base/ --recursive
+```
+
+⚠️ **Piège** : `kind delete` détruit aussi le namespace `ingress-nginx` et le patch `nodeSelector` qu'on avait appliqué. `localhost` ne répond plus tant qu'on n'a pas réinstallé le controller :
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+kubectl patch deployment ingress-nginx-controller -n ingress-nginx \
+  --type='json' \
+  -p='[{"op":"add","path":"/spec/template/spec/nodeSelector/ingress-ready","value":"true"}]'
+kubectl rollout status deployment/ingress-nginx-controller -n ingress-nginx
+```
+
+Le manifest `k8s/base/ingress.yaml` est lui ré-appliqué automatiquement par le `--recursive` du bloc précédent.
+
+**Question 1 — État des pods `task-service` ?**
+
+Les 2 pods passent en `STATUS: Running` (le process Node démarre normalement) mais restent bloqués en `READY: 0/1`. Le kubelet fait un `GET /does-not-exist` toutes les 10s, Express répond systématiquement `404 Not Found` → la probe est marquée failed. Tant que la readiness ne passe pas, Kubernetes considère le pod comme **pas prêt à recevoir du trafic** et le retire des `Endpoints` du Service `task-service`.
+
+```bash
+kubectl get endpoints -n staging task-service
+NAME           ENDPOINTS   AGE
+task-service   <none>      2m
+```
+
+Pas d'IP listée — confirmé : le Service n'a aucun backend.
+
+**Question 2 — Quels services répondent ?**
+
+- **Login** (`POST /api/users/login`) : ✅ fonctionne. Le `user-service` n'est pas affecté, sa propre readiness sur `/health` est OK, le Service `user-service` a bien ses 2 endpoints.
+- **GET /api/tasks** et **POST /api/tasks** : ❌ échouent avec un 502 / 503. Le flow est api-gateway → Service `task-service` → endpoints **vides** → l'appel HTTP du proxy ne trouve personne au bout du fil. Le `http-proxy-middleware` côté api-gateway logue un `proxy error` et incrémente `upstream_errors_total{service="task-service"}`.
+- **GET /api/notifications** : ✅ fonctionne (notification-service indépendant).
+
+L'app est donc **partiellement fonctionnelle** : on peut s'authentifier et lire les notifications, mais pas interagir avec les tâches. C'est exactement le but d'une readiness probe : isoler proprement les replicas pas prêts sans casser le reste.
+
+**Question 3 — Après remise du path à `/health`**
+
+```bash
+# Edit deployment.yaml puis :
+kubectl apply -f k8s/base/task-service/deployment.yaml
+```
+
+Le rolling update démarre : Kubernetes crée 2 nouveaux pods avec le bon path, attend qu'ils passent en `READY: 1/1`, puis termine les anciens. Une fois stabilisé :
+
+```bash
+kubectl get endpoints -n staging task-service
+NAME           ENDPOINTS                    AGE
+task-service   10.244.1.21:3002,10.244.2.18:3002   3m
+```
+
+Les 2 IPs sont de retour dans les endpoints. La création de tâche depuis l'UI réussit (201 Created), la trace dans Tempo montre bien le span `POST /tasks` côté `task-service`.
+
+### Readiness probe vs Liveness probe
+
+| | Readiness | Liveness |
+|---|---|---|
+| **Question répondue** | "Est-ce que le pod est prêt à recevoir du trafic ?" | "Est-ce que le pod est encore vivant ou bloqué ?" |
+| **Action si la probe échoue** | Le pod est retiré des `Endpoints` du Service. Aucun trafic ne lui est envoyé, mais il **n'est ni tué ni redémarré**. Dès que la probe repasse, il est réinjecté dans les endpoints. | Le kubelet **tue le conteneur** (SIGTERM puis SIGKILL après le grace period). Le Pod redémarre via la `restartPolicy: Always`, le compteur `RESTARTS` s'incrémente. |
+| **Cas d'usage** | Démarrage lent (warm-up, chargement de cache), dépendance temporairement indisponible, surcharge transitoire. | Process bloqué (deadlock, fuite mémoire, boucle infinie) qu'un redémarrage corrige. |
+
+**Que serait-il arrivé avec une liveness probe cassée à la place ?**
+
+Catastrophe en boucle. Avec `livenessProbe.path: /does-not-exist`, à chaque check (toutes les 20s d'après notre conf) le kubelet aurait reçu un 404 → tué le conteneur → le ReplicaSet l'aurait recréé → nouveau conteneur démarre → nouveau check → 404 → tué à nouveau, etc.
+
+Concrètement :
+- La colonne `RESTARTS` exploserait : `1`, `2`, `3`, ... à chaque cycle.
+- Après quelques restarts rapprochés, Kubernetes applique un **backoff exponentiel** et le pod passe en `STATUS: CrashLoopBackOff` avec des intervalles de redémarrage croissants (10s, 20s, 40s, ..., max 5 min).
+- Pendant les fenêtres `Running`, la readiness sur `/health` (intacte) repasse vert quelques secondes → le pod réintègre les endpoints → reçoit du trafic → est tué au check suivant → le client voit une connexion abruptement coupée.
+
+À retenir : **un mauvais path sur la readiness dégrade silencieusement l'app** (les pods sont juste hors-jeu, on peut investiguer tranquillement). **Un mauvais path sur la liveness** met les pods en `CrashLoopBackOff` permanent — c'est plus visible mais beaucoup plus brutal pour l'utilisateur. C'est aussi pour ça qu'on configure typiquement la liveness avec des seuils plus tolérants que la readiness (`failureThreshold` plus élevé, `initialDelaySeconds` plus long).
