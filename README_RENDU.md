@@ -412,3 +412,38 @@ readinessProbe:
 Une alternative aurait été un `tcpSocket` sur le port 6379 — plus léger mais moins précis : il valide que le port est ouvert sans vérifier que Redis répond effectivement aux commandes.
 
 Après `kubectl apply -f k8s/base/redis/`, le pod Redis passe en `1/1 Running` et le `notification-service` peut s'abonner aux canaux `task.created` et `task.status_changed` via le DNS interne `redis:6379`.
+
+---
+
+## Étape 7 — Déployer l'`api-gateway` et le frontend
+
+### `api-gateway`
+
+Trois fichiers créés dans `k8s/base/api-gateway/` :
+- **ConfigMap** : `PORT=3000`, les trois URLs internes (`USER_SERVICE_URL=http://user-service:3001`, `TASK_SERVICE_URL=http://task-service:3002`, `NOTIFICATION_SERVICE_URL=http://notification-service:3003`) et la conf OTEL.
+- **Deployment** : 2 replicas, image `taskflow-api-gateway`, `JWT_SECRET` injecté depuis `postgres-secret`, probes HTTP sur `/health` (port 3000).
+- **Service** : ClusterIP sur 3000.
+
+### `frontend`
+
+Deux fichiers créés dans `k8s/base/frontend/` :
+- **Deployment** : 2 replicas, image `taskflow-frontend` (nginx + bundle React précompilé), probes HTTP sur `/` (port 80). Aucun ConfigMap nécessaire — la conf nginx est embarquée dans l'image et le proxy `/api` → `api-gateway:3000` est résolu via le DNS Kubernetes.
+- **Service** : ClusterIP sur 80.
+
+### Justification des choix (replicas et ressources)
+
+**`api-gateway`** :
+1. **À quoi sert-il ?** Logique métier : reverse-proxy HTTP qui authentifie les requêtes (vérification JWT) et les route vers le bon service interne.
+2. **État partagé ?** Aucun. Chaque requête est traitée indépendamment, le JWT contient toute l'information utilisateur. Scaler horizontalement est sans risque.
+3. **Impact d'une indisponibilité ?** Critique : c'est le **point d'entrée unique**. Si l'`api-gateway` tombe, toute l'API est inaccessible — d'où `replicas: 2` minimum pour qu'un pod puisse encaisser le trafic pendant qu'un autre redémarre.
+4. **Code à chaque requête ?** Oui : Node parse le JSON, valide le JWT (HMAC-SHA256), reproxie en HTTP. CPU bound modéré → `requests: 100m / 128Mi`, `limits: 200m / 256Mi`, identique aux autres services Node.
+
+**`frontend`** :
+1. **À quoi sert-il ?** Fichiers statiques. nginx sert un bundle React précompilé + reverse-proxie `/api` vers l'`api-gateway`.
+2. **État partagé ?** Aucun. Tous les replicas servent les mêmes fichiers immuables issus de l'image.
+3. **Impact d'une indisponibilité ?** Modéré : l'API continue à tourner mais l'UI est inaccessible. `replicas: 2` aussi pour la résilience.
+4. **Code à chaque requête ?** Quasiment rien : nginx lit un fichier sur le disque ou forward un proxy_pass — pas de runtime applicatif. Ressources très basses → `requests: 25m / 32Mi`, `limits: 100m / 64Mi`.
+
+L'écart de ressources entre `api-gateway` (Node, CPU/mémoire modéré) et `frontend` (nginx, quasi rien) reflète directement la nature des deux services : exécution de logique vs. service de fichiers statiques.
+
+Après `kubectl apply -f k8s/base/api-gateway/ -f k8s/base/frontend/`, les 4 pods (`api-gateway` ×2, `frontend` ×2) passent en `1/1 Running`.
