@@ -311,3 +311,47 @@ user-service-6fd54dcb6b-5bzmv    1/1     Running   0          12s   taskflow-wor
 ```
 
 ![alt text](screenshots/k8s-user-service-running.png)
+
+---
+
+## Étape 4 — Déployer PostgreSQL (StatefulSet)
+
+Les trois fichiers `k8s/base/postgres/` (`secret.yaml`, `service.yaml`, `statefulset.yaml`) ont été complétés : Secret avec `POSTGRES_USER/PASSWORD/DB` + `DATABASE_URL` + `JWT_SECRET`, Service **headless** (`clusterIP: None`) sur le port 5432, StatefulSet 1 replica avec `volumeClaimTemplates` (1Gi RWO), probes `pg_isready` et image `postgres:16-alpine`.
+
+Après `kubectl apply -f k8s/base/postgres/` :
+
+```bash
+$ kubectl get pods -n staging -o wide
+NAME                            READY   STATUS    NODE
+postgres-0                      1/1     Running   taskflow-worker2
+user-service-6fd54dcb6b-4dh8p   1/1     Running   taskflow-worker2
+user-service-6fd54dcb6b-5bzmv   1/1     Running   taskflow-worker
+
+$ kubectl get pvc -n staging
+NAME                          STATUS   VOLUME    CAPACITY   ACCESS MODES
+postgres-data-postgres-0      Bound    pvc-...   1Gi        RWO
+```
+
+3 pods en `Running` au total. Le pod du StatefulSet a un nom **ordinal stable** (`postgres-0`) et non un hash aléatoire comme les Deployments. Le PVC `postgres-data-postgres-0` a été créé automatiquement à partir du `volumeClaimTemplates` et est `Bound` à un PV provisionné par la `StorageClass standard` de kind. Le scheduler a placé `postgres-0` sur `taskflow-worker2` ; les replicas du `user-service` sont répartis sur les deux workers.
+
+### Questions Deployment vs StatefulSet
+
+**Question 1** — La propriété qui garantit qu'un Pod conserve son volume au redémarrage / rescheduling est le couple **identité stable + `volumeClaimTemplates`**. Le StatefulSet attribue à chaque Pod un nom ordinal stable (`postgres-0`, `postgres-1`, …) et lui associe un PVC dédié dont le nom est dérivé de cet ordinal (`postgres-data-postgres-0`). Quand le Pod est supprimé puis recréé — sur le même nœud ou un autre — le contrôleur le **réassocie au même PVC**, donc au même PV (le PVC n'est pas détruit avec le Pod). Un Deployment, au contraire, génère des hashs aléatoires : à chaque recréation, le Pod perdrait toute corrélation avec un PVC précédent.
+
+**Question 2** — Un Deployment serait inadapté pour PostgreSQL pour plusieurs raisons :
+
+- **Pas d'identité stable** : avec `replicas: 1`, lors d'un rescheduling, le nouveau Pod (nouveau hash) pourrait tenter de monter un PVC `RWO` encore attaché à l'ancien Pod en cours d'arrêt → blocage `Multi-Attach error`.
+- **Stratégie de mise à jour incompatible** : un Deployment fait du rolling update (`maxSurge`), donc démarre un nouveau Pod **avant** d'arrêter l'ancien. Avec un volume `RWO` et une base de données, c'est interdit (deux processus PostgreSQL ne peuvent pas écrire sur le même répertoire de données simultanément).
+- **Pas d'ordre garanti** : si un jour on scale à plusieurs replicas (réplication primary/replica), un Deployment ne garantit aucun ordre de démarrage / terminaison. Un StatefulSet démarre `pod-0` → `pod-1` → `pod-2` séquentiellement, ce qui correspond exactement au besoin d'une base distribuée pour bootstrap.
+- **Pas de DNS stable** : le Service headless du StatefulSet expose chaque pod via `postgres-0.postgres.staging.svc` — utile pour la réplication. Un Deployment n'offre pas ça.
+
+**Question 3** — Parmi les services restants, **Redis** est le meilleur candidat à un StatefulSet en production. Dans cette stack, Redis sert de **bus de messages pub/sub** entre `task-service` (producer) et `notification-service` (subscriber). En staging on tolère une perte des données au redémarrage (d'où le Deployment dans l'étape 6), mais en production :
+
+- Si on active la **persistance Redis** (RDB/AOF) pour ne pas perdre les messages en cas de crash, il faut un volume persistant stable → `volumeClaimTemplates`.
+- Si on passe à du **Redis en cluster** (Sentinel ou Redis Cluster pour la haute dispo), chaque nœud Redis a besoin d'une **identité réseau stable** pour être référencé par ses pairs → DNS stable du Service headless.
+- L'ordre de démarrage importe pour qu'un master élu reste le master après reschedule.
+
+Les autres services sont stateless et conviennent parfaitement à un Deployment :
+- `notification-service` : worker pub/sub sans état persistant local (l'abonnement Redis se reconstruit au démarrage).
+- `api-gateway` : proxy HTTP, aucun état entre requêtes.
+- `frontend` : nginx servant des fichiers statiques compilés, totalement immuable.
