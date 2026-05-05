@@ -1,9 +1,11 @@
-# Production : images figées, secrets forts, plus de replicas, plus de ressources
+# Production : images figées, plus de replicas, plus de ressources.
+# Les secrets (postgres.password, jwt.secret) sont passés à part :
+#   helm upgrade -f values.production.yaml -f secrets.production.yaml ...
+# secrets.production.yaml est gitignored — voir secrets.production.yaml.example.
 image:
   pullPolicy: Always
 
 postgres:
-  password: REMPLACER_PAR_MOT_DE_PASSE_FORT
   db: taskflow_prod
   storageSize: 10Gi
 

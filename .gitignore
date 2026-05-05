@@ -5,3 +5,7 @@ dist/
 *.log
 .DS_Store
 kubeconfig.yml
+
+# Helm secrets (jamais commités)
+helm/**/secrets.*.yaml
+!helm/**/secrets.*.yaml.example

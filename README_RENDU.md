@@ -888,3 +888,87 @@ Deux éléments rendraient une migration vers `bitnami/postgresql` coûteuse :
 1. **Le ConfigMap `postgres-initdb`** monté dans `/docker-entrypoint-initdb.d/` qui crée les tables (`users`, `tasks`, `notifications`) et insère Alice/Bob. Le chart Bitnami expose `primary.initdb.scripts` pour ça, mais il faut transposer le contenu et adapter le mécanisme de montage — pas un drop-in.
 
 2. **Le couplage avec `postgres-secret`** consommé par les services métier (`user-service`, `task-service`, `api-gateway`) pour `DATABASE_URL` et `JWT_SECRET`. Bitnami crée son propre secret (`taskflow-postgresql`) avec un schéma de clés différent (`postgres-password`, `password`...). Migrer impose de réécrire toutes les références dans les autres templates ou de mapper via un secret intermédiaire.
+
+---
+
+## Étape 2 — Values par environnement
+
+### Sortir les secrets de `values.production.yaml`
+
+`postgres.password` et `jwt.secret` retirés de `values.production.yaml`. Création d'un fichier dédié `secrets.production.yaml` (gitignored) + un `.example` commité comme template :
+```yaml
+# secrets.production.yaml.example
+postgres:
+  password: REMPLACER_PAR_MOT_DE_PASSE_FORT
+jwt:
+  secret: REMPLACER_PAR_TOKEN_LONG_ALEATOIRE
+```
+
+`.gitignore` mis à jour :
+```
+helm/**/secrets.*.yaml
+!helm/**/secrets.*.yaml.example
+```
+
+Vérification :
+```bash
+$ git check-ignore helm/taskflow/secrets.production.yaml
+helm/taskflow/secrets.production.yaml   # ignoré ✓
+```
+
+Ajout du namespace production
+```bash
+kubectl create namespace production
+```
+
+Déploiement avec deux fichiers de values empilés (le second override le premier) :
+```bash
+helm upgrade --install taskflow ./helm/taskflow -n production \
+  -f ./helm/taskflow/values.production.yaml \
+  -f ./helm/taskflow/secrets.production.yaml
+```
+
+### Réflexion théorique
+
+**Question 1 — Comment déployer avec des valeurs sensibles sans les commiter ?**
+
+3 approches qui marchent :
+- Un fichier de values local gitignored (`secrets.production.yaml`) passé en `-f` au moment du deploy. Solution choisie ici.
+- `--set postgres.password=$PASSWORD` directement en CLI, avec la valeur lue depuis une variable d'env du shell ou un secret manager.
+- Un Kubernetes Secret créé hors Helm (kubectl, ExternalSecrets, Vault Agent), référencé par les templates via `valueFrom: secretKeyRef`.
+
+**Question 2 — Pourquoi c'est plus sûr qu'un repo privé ?**
+
+Un repo privé n'est pas un coffre-fort. Il a beaucoup plus de surface d'exposition qu'on ne le croit :
+- L'historique Git garde le secret pour toujours, même après rotation. Un `git revert` ne l'efface pas — il faut `git filter-repo` sur tout l'historique.
+- Tout collaborateur (présent ou ancien) qui a cloné une fois a le secret en local pour de bon.
+- Les forks, miroirs, sauvegardes, CI cache, IDE indexers le copient ailleurs.
+- Une fuite accidentelle (repo passé en public, token GitHub volé, leak via un agent IA, dependabot...) expose tout d'un coup.
+
+Sortir le secret du repo limite le périmètre à un seul endroit (vault, gestionnaire de secrets, fichier local sur les machines des opérateurs). On peut le faire tourner sans toucher à l'historique Git.
+
+**Question 3 — Que résout `helm-secrets` que cette solution ne résout pas ?**
+
+Ma solution règle "ne pas commiter les secrets". Mais alors, **où vit le fichier `secrets.production.yaml` ?** Sur la machine de l'opérateur, dans un Drive partagé, dans un Vault... bref, partout sauf dans Git — donc plus de versioning, plus de revue par PR, plus de traçabilité des modifications.
+
+`helm-secrets` permet de garder le fichier **dans Git**, mais chiffré (GPG / AWS KMS / age). Le déchiffrement se fait à la volée au `helm upgrade` avec une clé que seuls les opérateurs autorisés possèdent. On récupère versioning + audit + revue par PR sans exposer les valeurs en clair.
+
+Devient nécessaire dès qu'une équipe veut versionner ses secrets (GitOps avec ArgoCD/Flux, multi-environnements, rotation tracée), ou quand le nombre d'opérateurs rend la synchro manuelle d'un fichier hors Git impraticable.
+
+**Question 4 — Comment passer `$POSTGRES_PASSWORD` dans GitHub Actions sans leak ?**
+
+Le mot de passe vit dans un **GitHub Secret** (settings du repo). Il est injecté dans une variable d'env du job, puis passé à Helm via `--set`. GitHub masque automatiquement les secrets référencés via `${{ secrets.* }}` dans les logs (remplacés par `***`).
+
+```yaml
+- name: Deploy
+  env:
+    POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+    JWT_SECRET: ${{ secrets.JWT_SECRET }}
+  run: |
+    helm upgrade --install taskflow ./helm/taskflow -n production \
+      -f ./helm/taskflow/values.production.yaml \
+      --set postgres.password="$POSTGRES_PASSWORD" \
+      --set jwt.secret="$JWT_SECRET"
+```
+
+Pièges à éviter : ne pas faire `echo $POSTGRES_PASSWORD`, ne pas activer `set -x` dans le script, ne pas écrire le mot de passe dans un fichier qui serait uploadé en artifact. Sur des secrets multi-lignes ou avec des caractères exotiques, GitHub peut rater le masquage — préférer un `secrets.production.yaml` reconstruit à la volée (`echo "$SECRETS_YAML" > secrets.yaml`) avec `SECRETS_YAML` stocké en GitHub Secret.
