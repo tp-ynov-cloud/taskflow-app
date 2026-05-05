@@ -1,5 +1,6 @@
 image:
   prefix: bruce1000/taskflow
+  tag: v1.0.1
   pullPolicy: IfNotPresent
 
 postgres:
@@ -11,9 +12,41 @@ postgres:
 otel:
   endpoint: http://otel-collector:4318
 
+jwt:
+  secret: change-me-in-prod
+
 userService:
   replicaCount: 2
-  tag: v1.0.1
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+taskService:
+  replicaCount: 2
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+notificationService:
+  replicaCount: 1
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+apiGateway:
+  replicaCount: 2
   resources:
     requests:
       memory: "128Mi"
@@ -23,16 +56,14 @@ userService:
       cpu: "200m"
 
 frontend:
-# [...]
-
-taskService:
-# [...]
-
-notificationService:
-# [...]
-
-apiGateway:
-# [...]
+  replicaCount: 2
+  resources:
+    requests:
+      memory: "32Mi"
+      cpu: "25m"
+    limits:
+      memory: "64Mi"
+      cpu: "100m"
 
 redis:
   enabled: true

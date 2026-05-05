@@ -799,3 +799,92 @@ Pour créer un environnement `production` à côté de staging : dupliquer en `k
 - **GitOps + ArgoCD** : combine Kustomize/Helm avec un sync Git → cluster.
 
 Après avoir écrit ces 20 fichiers à la main, on comprend pourquoi personne ne maintient des manifests raw en prod multi-env.
+
+---
+
+# Partie 4A — Helm
+
+## Prérequis — Réflexion théorique
+
+**Question 1 — Comment Helm résout la répétition ? Quel fichier est central ?**
+
+Helm transforme les manifests en templates Go dans `templates/` et extrait les valeurs variables (namespace, tag, replicas, ports, URLs) dans un seul `values.yaml`. Au lieu de dupliquer `namespace: staging` 20 fois, on écrit `namespace: {{ .Values.namespace }}` une fois.
+
+Pour un nouvel environnement, on crée un `values.production.yaml` qui override uniquement ce qui change.
+
+Fichier central : **`values.yaml`** — source unique de vérité. `Chart.yaml` = métadonnées (nom, version, deps). `templates/_helpers.tpl` mutualise les blocs YAML communs (labels, probes) via `define`/`include`.
+
+**Question 2 — Quand devient-il indispensable ?**
+
+Autour de **3-4 services × 2 environnements**. En dessous, manifests bruts ou Kustomize léger suffisent.
+
+Le vrai déclencheur = produit **services × environnements × fréquence de changement**. 5 services × 2 envs = 40 manifests à synchroniser. Ajouter un preprod ou un env de review par PR fait exploser le produit. Chaque bump devient une opération multi-fichiers à risque.
+
+Helm est aussi indispensable dès qu'on consomme des charts tiers (Bitnami Redis, Prometheus Operator, ingress-nginx) — c'est le format standard de l'écosystème.
+
+---
+
+## Étape 1 — Créer le chart de Taskflow
+
+### Manipulations
+
+Templates créés en suivant le pattern de `user-service.yaml` :
+
+- `templates/task-service.yaml` — port 3002, `DATABASE_URL`, `REDIS_URL`, `JWT_SECRET`, OTEL.
+- `templates/notification-service.yaml` — port 3003, `REDIS_URL`, OTEL (pas de DB, notifs en mémoire).
+- `templates/api-gateway.yaml` — port 3000, URLs internes des 3 services, `JWT_SECRET`, OTEL.
+- `templates/frontend.yaml` — port 80, nginx + bundle React, probes sur `/`.
+
+`values.yaml` complété avec `image.tag` global, `jwt.secret`, et les blocs `taskService` / `notificationService` / `apiGateway` / `frontend` (replicaCount + resources).
+
+### Dépendance Redis Bitnami
+
+Ajout dans `Chart.yaml` :
+
+```yaml
+dependencies:
+  - name: redis
+    version: "~18.19.4"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: redis.enabled
+```
+
+```bash
+$ helm dependency update ./helm/taskflow
+Saving 1 charts
+Downloading redis from repo https://charts.bitnami.com/bitnami
+```
+
+Vérification du nom du Service :
+
+```bash
+$ helm template taskflow ./helm/taskflow \
+    --values ./helm/taskflow/values.yaml \
+    --show-only charts/redis/templates/master/service.yaml
+...
+metadata:
+  name: redis-master
+```
+
+`REDIS_URL` mis à jour dans les templates `task-service` et `notification-service` :
+
+```yaml
+- name: REDIS_URL
+  value: redis://redis-master:6379
+```
+
+### Réflexion théorique
+
+**Question 1 — Pourquoi Redis se prête à un chart officiel ?**
+
+Le critère : Redis est un composant d'**infrastructure stable et standard**, pas du métier. Sa config (auth, persistance, replication, sentinel) suit les mêmes patterns partout — Bitnami l'a déjà packagé proprement. On consomme, on n'invente rien.
+
+À l'inverse, nos services métier (`task-service`, `api-gateway`...) sont spécifiques à TaskFlow : pas de chart officiel possible, on doit écrire le nôtre.
+
+**Question 2 — Pourquoi garder un template maison pour Postgres ?**
+
+Deux éléments rendraient une migration vers `bitnami/postgresql` coûteuse :
+
+1. **Le ConfigMap `postgres-initdb`** monté dans `/docker-entrypoint-initdb.d/` qui crée les tables (`users`, `tasks`, `notifications`) et insère Alice/Bob. Le chart Bitnami expose `primary.initdb.scripts` pour ça, mais il faut transposer le contenu et adapter le mécanisme de montage — pas un drop-in.
+
+2. **Le couplage avec `postgres-secret`** consommé par les services métier (`user-service`, `task-service`, `api-gateway`) pour `DATABASE_URL` et `JWT_SECRET`. Bitnami crée son propre secret (`taskflow-postgresql`) avec un schéma de clés différent (`postgres-password`, `password`...). Migrer impose de réécrire toutes les références dans les autres templates ou de mapper via un secret intermédiaire.
