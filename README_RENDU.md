@@ -1010,3 +1010,106 @@ Trois différences structurelles :
 Pourquoi ces différences existent : k8s raw cherche à **découpler les données de la spec** (changer la config sans toucher au Deployment, partager un Secret entre services). Helm n'a pas ce besoin parce qu'il **régénère tout à chaque `helm upgrade`** depuis la même source — l'indirection ConfigMap/Secret devient redondante pour des valeurs non sensibles. Les vrais secrets restent à part (cf. étape 2).
 
 ![alt text](screenshots/help-list-staging.png)
+
+---
+
+## Étape 4 — Tester une mise à jour
+
+### Plugin de prévisualisation
+
+[`helm-diff`](https://github.com/databus23/helm-diff) ajoute une commande `helm diff upgrade` qui rend le YAML local et le compare au manifest courant côté cluster — un `kubectl diff` mais piloté par Helm.
+
+Installation :
+
+```bash
+helm plugin install https://github.com/databus23/helm-diff --verify=false
+```
+
+### Question 1 — Modification, commande, sortie
+
+Modif dans `helm/taskflow/values.yaml` :
+
+```diff
+ notificationService:
+-  replicaCount: 1
++  replicaCount: 2
+```
+
+Commande de prévisualisation :
+
+```bash
+helm diff upgrade taskflow ./helm/taskflow -n staging \
+  -f ./helm/taskflow/values.yaml
+```
+
+Sortie :
+
+```diff
+staging, notification-service, Deployment (apps) has changed:
+  spec:
+-   replicas: 1
++   replicas: 2
+    selector:
+      matchLabels:
+        app: notification-service
+    ...
+```
+
+![alt text](screenshots/helm-diff.png)
+
+Une seule ressource impactée, un seul champ qui change. Aucune autre dérive — exactement ce qu'on attendait.
+
+### Question 2 — `replicaCount` vs `image.tag` : où l'outil est-il critique ?
+
+Le diff est **bien plus critique sur un changement d'`image.tag`**.
+
+Un changement de `replicaCount` est peu risqué : Kube ajoute/retire des pods sur un Deployment existant, le code applicatif ne change pas, l'opération est trivialement réversible (revenir à la valeur d'avant).
+
+Un changement d'`image.tag` déclenche un **rolling update sur tous les pods du Deployment**. Avec `maxSurge: 25%` / `maxUnavailable: 25%`, Kube remplace progressivement les anciens pods par des nouveaux qui tirent la nouvelle image. Tout ce qui a été modifié dans cette image est appliqué d'un coup en prod : breaking change de schéma de config, env var renommée, port modifié, dépendance manquante, régression silencieuse... Sans diff préalable, on découvre le problème quand les nouveaux pods échouent leur readiness — déjà 25% du trafic peut être impacté avant que le rolling update ne se bloque.
+
+Le diff permet de vérifier deux choses avant l'apply :
+1. **Le tag effectivement changé** est bien celui attendu (`v1.0.4-arm64`, pas un `:latest` ou un tag voisin).
+2. **Rien d'autre n'a bougé** en parallèle (env vars, ressources, probes) — typique des bugs où on bump l'image et on remarque trop tard que `values.yaml` avait aussi muté.
+
+Pour un `replicaCount`, l'oubli est rattrapable. Pour une mauvaise image, le rolling update est déjà parti.
+
+### Réflexion théorique — Historique des déploiements
+
+**Question 1 — Ce qu'on voit avec `watch kubectl get pods -n staging -o wide`**
+
+Avant l'upgrade : un seul pod `notification-service-*` en `1/1 Running`.
+
+Après le `helm upgrade` qui passe le replicaCount à 2 : un **deuxième** pod `notification-service-*` apparaît, avec un nouveau hash, en `Pending` → `ContainerCreating` → `1/1 Running`. L'ancien pod n'est pas touché — pas de `Terminating`, pas de redémarrage.
+
+C'est le comportement normal d'un scale-up : Kube ajoute des replicas, il ne remplace pas les existants. Aucun rolling update du pod template puisque l'image et les env vars n'ont pas bougé. Les autres services (`api-gateway`, `task-service`, etc.) restent inchangés — Helm n'a généré un diff que sur la ressource `notification-service`.
+
+**Question 2 — Info dans `helm history` absente de `kubectl rollout history`**
+
+```bash
+$ helm history taskflow -n staging
+REVISION  UPDATED                  STATUS      CHART           APP VERSION  DESCRIPTION
+1         Tue May  5 14:05:57 2026 superseded  taskflow-0.1.0  1.0.0        Install complete
+2         Tue May  5 14:16:50 2026 deployed    taskflow-0.1.0  1.0.0        Rollback to 1
+
+$ kubectl rollout history deployment/notification-service -n staging
+REVISION  CHANGE-CAUSE
+1         <none>
+```
+
+Plusieurs infos sont dans Helm et pas dans Kube :
+
+- **La version du chart** (`taskflow-0.1.0`). Pas le tag d'image (qui est l'app version), mais la version du package Helm — donc des templates eux-mêmes. En prod, savoir qu'on a déployé `taskflow-0.3.7` vs `taskflow-0.4.0` permet de retrouver les changements de structure (probes ajoutées, env var renommée, ressource changée) sans remonter dans Git à la main.
+- **Le statut** (`deployed` / `superseded` / `failed`). `kubectl rollout history` ne liste **pas** les rollouts qui ont échoué — il ne garde que ce qui est passé. Helm garde même les revisions en `failed`, ce qui est critique pour le post-mortem ("la 4 a échoué, on a rollback à la 3").
+- **La description** auto-générée (`Install complete`, `Rollback to 1`...) qui contextualise sans annotation manuelle.
+
+En prod, ces infos sont critiques parce qu'un `kubectl rollout history` peut donner une fausse impression de stabilité (que des succès affichés) alors que `helm history` montre les vraies tentatives, dont les ratées.
+
+**Question 3 — `helm rollback taskflow 1` vs `kubectl rollout undo deployment/task-service`**
+
+Différence fondamentale : **la granularité du rollback**.
+
+`kubectl rollout undo deployment/task-service` ramène uniquement le **pod template** du Deployment `task-service` à sa version précédente. Il ne touche ni le Service, ni le ConfigMap, ni le Secret, ni l'Ingress, ni les autres Deployments.
+
+`helm rollback taskflow 1` ramène **toutes les ressources de la release** à leur état de la révision 1, en une transaction. Si la release v2 avait modifié le Deployment **et** son ConfigMap **et** ajouté un Secret, le rollback Helm restaure les trois ; le `kubectl rollout undo`, lui, restaure le Deployment mais laisse le ConfigMap v2 et le Secret v2 en place — état incohérent où le pod tourne avec l'ancienne image mais lit la nouvelle config.
+
+Helm tracke l'ensemble du bundle déployé comme une unité. Kube tracke l'historique d'un seul Deployment, isolément. Dès que la release modifie plusieurs objets ensemble (ce qui est le cas standard avec une chart Helm), seul `helm rollback` garantit la cohérence de l'état restauré.
