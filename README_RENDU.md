@@ -972,3 +972,41 @@ Le mot de passe vit dans un **GitHub Secret** (settings du repo). Il est inject�
 ```
 
 Pièges à éviter : ne pas faire `echo $POSTGRES_PASSWORD`, ne pas activer `set -x` dans le script, ne pas écrire le mot de passe dans un fichier qui serait uploadé en artifact. Sur des secrets multi-lignes ou avec des caractères exotiques, GitHub peut rater le masquage — préférer un `secrets.production.yaml` reconstruit à la volée (`echo "$SECRETS_YAML" > secrets.yaml`) avec `SECRETS_YAML` stocké en GitHub Secret.
+
+---
+
+## Étape 3 — Installation du chart
+
+![alt text](screenshots/helm-task-service.png)
+
+### Réflexion théorique
+
+**Question 1 — Variable référencée sans valeur correspondante ?**
+
+Helm n'échoue pas. La variable est rendue comme **chaîne vide**, et le YAML produit reste syntaxiquement valide.
+
+Test : suppression de `taskService.replicaCount` dans `values.yaml`, puis `helm template` :
+
+```yaml
+spec:
+  replicas:                # vide, pas d'erreur côté Helm
+  selector:
+    matchLabels:
+      app: task-service
+```
+
+Le silence côté Helm est dangereux — l'erreur tombe seulement au `kubectl apply` quand l'API Server rejette le manifest, ou pire, le Deployment passe avec un comportement par défaut (replicas=1). Pour bloquer en amont, on peut utiliser `{{ required "taskService.replicaCount manquant" .Values.taskService.replicaCount }}` dans le template.
+
+**Question 2 — Différences avec `k8s/base/task-service/deployment.yaml` ?**
+
+Trois différences structurelles :
+
+1. **Pas de ConfigMap ni de Secret intermédiaire.** En k8s base, les variables passent par `envFrom: configMapRef` (pour `task-service-cm`) et `valueFrom: secretKeyRef` (pour `postgres-secret`). En Helm, toutes les valeurs sont **inlinées** directement dans `env:` à partir de `values.yaml`. Helm devient la source unique — pas besoin d'un objet Kube intermédiaire pour stocker les valeurs.
+
+2. **Namespace dynamique.** Le manifest k8s a `namespace: staging` codé en dur ; le template Helm a `namespace: {{ .Release.Namespace }}`, donc la même release peut tourner en `staging`, `production` ou `preprod` sans toucher au YAML.
+
+3. **Un seul fichier au lieu de trois.** En k8s base : `deployment.yaml`, `service.yaml`, `configmap.yaml` séparés. En Helm : tout regroupé dans `task-service.yaml` avec des `---`. C'est un choix d'organisation — Helm s'en fiche, ce qui compte c'est qu'un service applicatif = une unité logique.
+
+Pourquoi ces différences existent : k8s raw cherche à **découpler les données de la spec** (changer la config sans toucher au Deployment, partager un Secret entre services). Helm n'a pas ce besoin parce qu'il **régénère tout à chaque `helm upgrade`** depuis la même source — l'indirection ConfigMap/Secret devient redondante pour des valeurs non sensibles. Les vrais secrets restent à part (cf. étape 2).
+
+![alt text](screenshots/help-list-staging.png)
