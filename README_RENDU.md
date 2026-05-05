@@ -6,11 +6,11 @@ Arnaud Gaydamour - Elias El Oudghiri
 
 ### SDK OpenTelemetry — `tracing.js`
 
-Chaque service expose un fichier `src/tracing.js` qui initialise le SDK avec `NodeSDK`, déclare la ressource via `new Resource({ SERVICE_NAME: serviceName })` pour identifier le service dans Tempo, et exporte les traces vers l'OTel Collector en OTLP HTTP.
+Chaque service a un `src/tracing.js` qui init le SDK avec `NodeSDK`, déclare la ressource via `new Resource({ SERVICE_NAME: serviceName })` et exporte les traces vers l'OTel Collector en OTLP HTTP.
 
-Les auto-instrumentations HTTP, Express et PG sont activées via `getNodeAutoInstrumentations`. Le fichier est chargé en premier dans chaque `index.js` pour garantir que l'instrumentation est active avant tout démarrage.
+Auto-instrumentations HTTP, Express et PG activées via `getNodeAutoInstrumentations`. Le fichier est require en premier dans chaque `index.js` pour que l'instrumentation soit active avant tout démarrage.
 
-Pour le shutdown propre, on écoute `SIGTERM` et `SIGINT` et on appelle `sdk.shutdown()` pour vider les buffers avant de quitter.
+Shutdown propre : on écoute `SIGTERM`/`SIGINT` et on appelle `sdk.shutdown()` pour vider les buffers.
 
 ![shutdown-open-telemetry](screenshots/shutdown-open-telemetry.png)
 
@@ -18,35 +18,35 @@ Pour le shutdown propre, on écoute `SIGTERM` et `SIGINT` et on appelle `sdk.shu
 
 ### OTel Collector — `infra/otel/config.yml`
 
-Les receivers sont configurés en `otlp` avec gRPC (4317) et HTTP (4318). L'exporter vers Tempo utilise gRPC (`tempo:4317`), plus performant qu'HTTP pour du backend-to-backend.
+Receivers `otlp` en gRPC (4317) et HTTP (4318). Export vers Tempo en gRPC (`tempo:4317`).
 
-Les métriques internes du collector sont exposées sur `0.0.0.0:8888` pour que Prometheus puisse les scraper. Deux pipelines sont définis : `traces` (otlp → batch → tempo + debug) et `metrics` (otlp → batch → debug).
+Métriques internes du collector exposées sur `0.0.0.0:8888` pour Prometheus. Deux pipelines : `traces` (otlp → batch → tempo + debug) et `metrics` (otlp → batch → debug).
 
 ---
 
 ### Tempo — `infra/tempo/tempo.yml`
 
-Tempo expose son API et son UI sur le port 3200, utilisé par Grafana comme datasource. Il reçoit les traces en gRPC sur le port 4317 depuis l'OTel Collector.
+API + UI sur 3200 (datasource Grafana). Réception des traces en gRPC sur 4317.
 
-Le stockage est local (`/tmp/tempo/traces`) avec un Write-Ahead Log (`/tmp/tempo/wal`), un buffer disque qui protège les traces en cas de crash avant leur écriture définitive.
+Stockage local (`/tmp/tempo/traces`) avec WAL (`/tmp/tempo/wal`) qui protège les traces en cas de crash avant écriture.
 
 ---
 
 ### Prometheus — `infra/prometheus/prometheus.yml`
 
-Le scrape interval global est de 15s. Les cibles configurées sont : `api-gateway:3000`, `user-service:3001`, `task-service:3002`, `notification-service:3003`, et `otel-collector:8888` pour les métriques internes du collector.
+Scrape interval 15s. Cibles : `api-gateway:3000`, `user-service:3001`, `task-service:3002`, `notification-service:3003`, `otel-collector:8888`.
 
 ---
 
 ### Grafana — provisioning automatique
 
-La datasource Prometheus (`http://prometheus:9090`) est marquée `isDefault: true`. Tempo est configuré sur `http://tempo:3200`. Le provider de dashboards charge automatiquement les JSON depuis `/var/lib/grafana/dashboards` au démarrage.
+Datasource Prometheus (`http://prometheus:9090`) en `isDefault`. Tempo sur `http://tempo:3200`. Les dashboards JSON dans `/var/lib/grafana/dashboards` sont chargés au démarrage.
 
 ---
 
 ### docker-compose.infra.yml
 
-Les services démarrent dans cet ordre : `tempo` → `otel-collector` → `prometheus` → `grafana`. Tempo doit être prêt avant le collector qui lui envoie des traces dès le lancement.
+Ordre de démarrage : `tempo` → `otel-collector` → `prometheus` → `grafana`. Tempo doit être prêt avant le collector.
 
 ---
 
@@ -54,15 +54,18 @@ Les services démarrent dans cet ordre : `tempo` → `otel-collector` → `prome
 
 ### Métriques
 
-Les métriques métier sont déclarées dans `metrics.js` de chaque service et instrumentées dans le code métier. Le `task-service` expose `tasks_created_total{priority}`, `tasks_status_changes_total{from_status,to_status}` et `tasks_gauge{status}` mise à jour par une requête `COUNT(*) GROUP BY status` après chaque mutation.
+Métriques métier déclarées dans `metrics.js` de chaque service.
 
-Le `user-service` expose `user_registrations_total` et `user_login_attempts_total{success}`. L'`api-gateway` expose `upstream_errors_total{service}` incrémenté à chaque proxy error. Le `notification-service` expose `notifications_sent_total{event_type}`.
+- `task-service` : `tasks_created_total{priority}`, `tasks_status_changes_total{from_status,to_status}`, `tasks_gauge{status}` (mise à jour par `COUNT(*) GROUP BY status` après chaque mutation).
+- `user-service` : `user_registrations_total`, `user_login_attempts_total{success}`.
+- `api-gateway` : `upstream_errors_total{service}` (incrémenté à chaque proxy error).
+- `notification-service` : `notifications_sent_total{event_type}`.
 
 ---
 
 ### Dashboards Grafana
 
-Les deux dashboards sont exportés dans `infra/grafana/dashboards/` et chargés automatiquement au démarrage de Grafana.
+Exportés dans `infra/grafana/dashboards/`, chargés au démarrage.
 
 ---
 
@@ -70,23 +73,23 @@ Les deux dashboards sont exportés dans `infra/grafana/dashboards/` et chargés 
 
 #### Compréhension
 
-La requête `POST /api/tasks` depuis le frontend génère une trace distribuée qui traverse api-gateway → task-service → PostgreSQL.
+Un `POST /api/tasks` génère une trace qui traverse api-gateway → task-service → PostgreSQL.
 
 ![scenario](screenshots/scenario.png)
 
-Les spans sont reliés par un `traceId` commun propagé via le header HTTP `traceparent`. L'auto-instrumentation gère la propagation sans code supplémentaire.
+Spans reliés par un `traceId` propagé via le header `traceparent`. Auto-instrumentation gère la propagation sans code.
 
-Sur les spans HTTP, les attributs clés sont `http.method`, `http.route` (le pattern Express, pas l'URL réelle), `http.status_code`, et `span.kind` qui vaut `SERVER` pour le service qui reçoit et `CLIENT` pour celui qui émet.
+Spans HTTP : `http.method`, `http.route` (pattern Express, pas l'URL), `http.status_code`, `span.kind` (`SERVER` côté receveur, `CLIENT` côté émetteur).
 
-Sur les spans PostgreSQL, `db.statement` contient la requête SQL complète — utile pour détecter les requêtes lentes ou les N+1. `db.system` vaut `postgresql`, `net.peer.name` vaut `postgres`.
+Spans PostgreSQL : `db.statement` (SQL complet, utile pour les requêtes lentes / N+1), `db.system=postgresql`, `net.peer.name=postgres`.
 
 ![alt text](screenshots/scenario_span_database.png)
 
-L'attribut `service.name` est commun à tous les spans d'un service, défini via `OTEL_SERVICE_NAME` dans `tracing.js`.
+`service.name` est commun à tous les spans d'un service, défini via `OTEL_SERVICE_NAME`.
 
 #### Ajout de spans custom
 
-Redis/pub-sub n'est pas couvert par l'auto-instrumentation. Un span manuel est ajouté dans `task-service/src/routes.js` autour de la publication :
+Redis pub/sub n'est pas couvert par l'auto-instrumentation. Span manuel dans `task-service/src/routes.js` autour de la publication :
 
 ```js
 const { trace } = require("@opentelemetry/api");
@@ -97,7 +100,7 @@ await publish("task.created", { taskId: task.id, title: task.title, assigneeId: 
 span.end();
 ```
 
-Ce span apparaît dans le waterfall entre le span `POST /tasks` et la fin de la requête. On peut le retrouver dans Tempo avec :
+Visible dans le waterfall entre `POST /tasks` et la fin de la requête. Recherche Tempo :
 
 ```traceql
 { name = "publish.task.created" }
@@ -111,7 +114,7 @@ Ce span apparaît dans le waterfall entre le span `POST /tasks` et la fin de la 
 
 ### Configuration
 
-Promtail est configuré avec `docker_sd_configs` pour lire l'API Docker et récupérer les métadonnées des conteneurs. Le pipeline extrait `level` et `msg` depuis le JSON Pino, puis convertit les niveaux numériques en strings (30→info, 40→warn, 50→error) via une `template` stage. Loki utilise le store `tsdb` (le plus récent recommandé) avec un stockage `filesystem`.
+Promtail en `docker_sd_configs` lit l'API Docker pour récupérer les métadonnées des conteneurs. Pipeline : extraction `level` et `msg` depuis le JSON Pino, puis conversion des niveaux numériques (30→info, 40→warn, 50→error) via `template`. Loki utilise le store `tsdb` avec stockage `filesystem`.
 
 ---
 
@@ -119,13 +122,13 @@ Promtail est configuré avec `docker_sd_configs` pour lire l'API Docker et récu
 
 #### Filtrer les logs du task-service
 
-La syntaxe LogQL utilisée est `{job="task-service"}`. Le sélecteur entre accolades fonctionne comme en PromQL : on sélectionne un flux de logs par label.
+`{job="task-service"}` — sélecteur entre accolades, comme PromQL.
 
-La différence avec Prometheus est que LogQL opère sur des lignes de texte, pas des valeurs numériques. On peut filtrer sur le contenu (`|= "error"`), parser le format (`| json`) et extraire des champs — le résultat par défaut est un flux de logs bruts, pas un graphe.
+LogQL opère sur des lignes de texte, pas des valeurs. On filtre sur le contenu (`|= "error"`), on parse (`| json`), on extrait des champs. Résultat = flux de logs, pas un graphe.
 
 ![alt text](screenshots/loki-syntax.png)
 
-Pour retrouver les erreurs du task-service :
+Erreurs du task-service :
 
 ```logql
 {service_name="/taskflow-app-task-service-1", level="error"} |= ``
@@ -135,46 +138,42 @@ Pour retrouver les erreurs du task-service :
 
 #### Logs d'erreur et filtrage sur statusCode 500
 
-Logs de niveau error sur tous les services :
+Tous services, niveau error :
 
 ```logql
 {job=~".+"} | json | level="error"
 ```
 
-Filtrage sur les requêtes ayant retourné un 500 :
+Filtrage 500 :
 
 ```logql
 {job=~".+"} | json | statusCode=`500`
 ```
 
-Dans Prometheus, `http_requests_total{status="500"}` donne un compteur agrégé — performant, indexé, conçu pour alerter. Dans Loki, on obtient la même information en parsant les logs, mais c'est plus coûteux car Loki doit lire et parser chaque ligne.
-
-Prometheus est la bonne approche pour détecter et compter les erreurs 500. Loki est utile pour voir le détail de chaque requête en erreur — ce qu'une métrique seule ne peut pas fournir. Les deux sont complémentaires.
+Prometheus = compteur agrégé indexé, conçu pour alerter. Loki = parsing à la lecture, plus coûteux. Pour compter les 500 → Prometheus. Pour voir le détail de chaque requête en erreur → Loki. Complémentaires.
 
 ![alt text](screenshots/prometheus-logs.png)
 ![alt text](screenshots/loki-logs.png)
 
 #### Corrélation logs ↔ traces
 
-Le traceId relevé dans Tempo après un `POST /api/tasks` : `cb67f832b3533ede816e99f2f420738c`
+`traceId` relevé après un `POST /api/tasks` : `cb67f832b3533ede816e99f2f420738c`
 
-On peut le retrouver dans Loki car l'auto-instrumentation OTel injecte le `trace_id` dans le contexte et Pino le logue dans le JSON :
+Retrouvable dans Loki car l'auto-instrumentation OTel injecte le `trace_id` dans le contexte et Pino le logue :
 
 ```logql
 {job=~".+"} |= "cb67f832b3533ede816e99f2f420738c"
 ```
 
-Pour que ce soit automatique, il faudrait configurer les **Derived Fields** dans la datasource Loki de Grafana : une regex détecte le champ `trace_id` dans les logs et crée un lien cliquable vers Tempo.
+Pour automatiser : configurer les **Derived Fields** dans la datasource Loki (regex sur `trace_id` → lien cliquable vers Tempo).
 
 ![alt text](screenshots/loki-trace-id.png)
 
 #### Démarche d'investigation face à un pic d'erreurs
 
-On commence par Prometheus : `rate(http_requests_total{status=~"5.."}[5m])` ventilé par `job` identifie le service concerné et la fenêtre de temps.
-
-On bascule sur Loki pour lire les logs d'erreur du service : `{job="task-service"} | json | level="error"`. Les logs Pino donnent le message exact et la route concernée.
-
-On prend un `trace_id` visible dans les logs et on l'ouvre dans Tempo. Le waterfall montre quelle étape a échoué dans la chaîne et combien de temps chaque span a pris.
+1. Prometheus : `rate(http_requests_total{status=~"5.."}[5m])` ventilé par `job` → service concerné + fenêtre.
+2. Loki : `{job="task-service"} | json | level="error"` → message exact + route.
+3. Tempo : ouvrir un `trace_id` vu dans les logs → waterfall pour voir où ça a coincé.
 
 ---
 
@@ -182,67 +181,69 @@ On prend un `trace_id` visible dans les logs et on l'ouvre dans Tempo. Le waterf
 
 ## Étape 1 — Lancer un premier test léger
 
-**Question 1** — La latence p95 mesurée par k6 est **32.29ms**, en dessous du seuil de 200ms.
+**Question 1** — p95 = **32.29ms**, sous le seuil de 200ms.
 
 ![alt text](screenshots/1-first-stress-test.png)
 
-**Question 2** — `http_req_failed` est à 100%, il y a des erreurs 401, le token n'est pas transmis à la requête.
+**Question 2** — `http_req_failed` à 100%, erreurs 401 : le token n'est pas transmis à la requête.
 
 ![alt text](screenshots/1-first-stress-test-error.png)
 
 
 ## Étape 2 — Monter la charge progressivement
 
-**Question 3** — À 50 VUs (scénario par défaut), le check `tasks response < 500ms` ne faillit pas : p95 à 81.1ms, 0% d'échecs.
+**Question 3** — À 50 VUs, `tasks response < 500ms` passe : p95 81.1ms, 0% d'échecs.
 
 ![alt text](screenshots/2-k6-result-run.png)
 
-À 100 VUs, les checks passent encore. À 150 VUs, le check commence à échouer : 1352 échecs sur 1605 tentatives (14% d'échecs), avec une p95 globale à 2.79s. Le système est dégradé mais pas totalement saturé — 15% des GET tasks passent encore sous 500ms. À 200 VUs, le check s'effondre complètement : 0% de succès, p95 à 2.45s. Le seuil de rupture se situe donc autour de **150 VUs**.
+À 100 VUs : OK. À 150 VUs : 1352/1605 échecs (14%), p95 globale 2.79s — système dégradé. À 200 VUs : 0% de succès, p95 2.45s. Seuil de rupture **~150 VUs**.
 
-**Test avec 150 vus**
+**Test 150 VUs**
 ![alt text](screenshots/2-k6-result-run-150-vus.png)
 
-**Test avec 200 vus**
+**Test 200 VUs**
 ![alt text](screenshots/2-k6-result-run-200-vus.png)
 
-**Question 4** — À chaque itération, l'API Gateway reçoit un total de 4 requêtes, qui sont ensuite distribuées de la manière suivante :
-- 1 requête vers le user-service (POST login).
-- 2 requêtes vers le task-service (GET tasks et POST create task).
-- 1 requête vers le notification-service (GET notifications).
+**Question 4** — Par itération, l'API Gateway reçoit 4 requêtes :
+- 1 → user-service (POST login)
+- 2 → task-service (GET tasks + POST create task)
+- 1 → notification-service (GET notifications)
 
-*Répartition du trafic :*  
-Puisque l'API Gateway centralise ces 4 appels, elle supporte logiquement une charge plus lourde que les services individuels. Concrètement, elle reçoit :
-- 4 fois plus de trafic que le user-service ou le notification-service (qui n'en reçoivent qu'un seul chacun).
-- 2 fois plus de trafic que le task-service (qui en reçoit deux).
+L'API Gateway encaisse 4× le trafic du user-service ou du notification-service, et 2× celui du task-service.
 
 ![alt text](screenshots/2-first-stress-test.png)
 
-**Question 5** — Le `task-service` reçoit 2 requêtes par itération contre 1 pour les autres services, mais chacune de ces requêtes est coûteuse : le GET tasks fait un `SELECT` complet, le POST tasks fait un `INSERT` puis un `COUNT GROUP BY` pour la gauge, et déclenche une publication Redis.
+**Question 5** — Le `task-service` reçoit 2 requêtes par itération mais chacune coûte cher : GET = `SELECT` complet, POST = `INSERT` + `COUNT GROUP BY` pour la gauge + publication Redis.
 
 
 ## Étape 3 — Tester les limites de `docker scale`
 
-**Question 6** — `docker compose up --scale task-service=3` échoue avec une erreur de port déjà alloué. La cause est le mapping statique `"3002:3002"` dans `docker-compose.yml` : les 3 replicas essaient tous de binder le même port hôte 3002, ce qui est impossible. La fix est de supprimer les ports du task-service — Docker gère les ports internes seul, et l'api-gateway accède au service via le réseau Docker interne.
+**Question 6** — `docker compose up --scale task-service=3` échoue : port déjà alloué. Cause : mapping statique `"3002:3002"` dans `docker-compose.yml` — les 3 replicas tentent de binder le même port hôte. Fix : retirer les ports du task-service (l'api-gateway accède au service via le réseau Docker interne).
 
 ![alt text](screenshots/scale-port-error.png)
 
-**Question 7** — Après le fix, les 3 replicas démarrent et reçoivent bien du trafic dans Grafana. Les checks passent mieux qu'avant : `tasks response < 500ms` monte à 36% de succès contre 15% avant le scaling, et la p95 tombe de 2.79s à 1.41s. Le scaling a donc amélioré les métriques.
+**Question 7** — Après le fix, les 3 replicas démarrent et reçoivent du trafic. `tasks response < 500ms` passe à 36% (vs 15%), p95 tombe à 1.41s (vs 2.79s).
 
-Cependant, de nouvelles erreurs apparaissent : 5 `create task 201` échoués et 35 `notifs response < 500ms` dépassés qui n'existaient pas avant. Avec 3 replicas, chacun maintient son propre pool de connexions PostgreSQL. À 150 VUs, les 3 replicas ouvrent des connexions en parallèle et peuvent atteindre la limite `max_connections` de Postgres (100 par défaut) — Postgres refuse alors de nouvelles connexions et le service retourne un 500. C'est une limite du scaling horizontal naïf : on scale l'applicatif mais la base reste un goulot partagé. En production on résoudrait ça avec un connection pooler comme PgBouncer.
+Mais nouvelles erreurs : 5 `create task 201` échoués + 35 `notifs response < 500ms` dépassés. Cause : chaque replica maintient son pool de connexions PostgreSQL → à 150 VUs on atteint `max_connections=100` → Postgres refuse → 500. Limite du scaling horizontal naïf — la base reste un goulot partagé. En prod : PgBouncer.
 
-En revanche, sur `http://localhost:9090/targets`, Prometheus ne voit qu'une seule target `task-service` malgré les 3 replicas. Prometheus est configuré avec l'adresse statique `task-service:3002` dans `prometheus.yml` — Docker résout ce nom DNS vers l'un des replicas de façon aléatoire, Prometheus scrape donc toujours un seul container sans avoir connaissance des deux autres.
+Sur Prometheus, une seule target `task-service` malgré les 3 replicas : `prometheus.yml` pointe sur l'adresse statique `task-service:3002`, Docker résout ce DNS vers un replica au hasard.
 
 ![alt text](screenshots/3-k6-scale-error.png)
 
-**Question 8** — `docker scale` ne suffit pas en production pour plusieurs raisons. Il n'y a pas de service discovery : Prometheus et d'autres outils ne détectent pas automatiquement les nouvelles instances. Il n'y a pas de health check au niveau du load balancer : si un replica tombe, le trafic continue de lui être envoyé. Enfin, il n'y a aucune gestion du rolling update ou du rollback. Kubernetes résout ces problèmes avec des Deployments (scaling déclaratif avec health checks), un service discovery natif, et une intégration avec des outils comme Prometheus Operator qui détecte automatiquement les pods via des `ServiceMonitor`.
+**Question 8** — `docker scale` ne suffit pas en prod :
+- Pas de service discovery (Prometheus ne voit pas les nouvelles instances).
+- Pas de health check au niveau du LB (un replica down continue de recevoir du trafic).
+- Pas de rolling update / rollback.
+
+Kubernetes résout ça : Deployments avec health checks, service discovery natif, intégration Prometheus Operator (`ServiceMonitor`).
 
 ## Étape 4 — Limites de l'instrumentation
 
-**Question 9** — Le panel affiche "No data" parce que les erreurs signalées par k6 ne sont pas des erreurs HTTP 5xx. Le check `tasks response < 500ms` échoue quand le serveur répond en plus de 500ms mais retourne quand même un 200 OK — Prometheus ne voit donc aucun status 5xx. Le panel ne peut pas détecter une dégradation de performance, seulement des erreurs applicatives. Une réponse lente reste invisible pour ce panel.
+**Question 9** — Le panel affiche "No data" car les erreurs k6 ne sont pas des 5xx. `tasks response < 500ms` échoue quand le serveur répond en >500ms mais retourne quand même 200 → Prometheus ne voit pas de 5xx. Le panel ne détecte pas la dégradation de perf, juste les erreurs applicatives.
 
-**Question 10** — Le panel mesure la latence **à l'intérieur** du service, à partir du moment où Node.js accepte la connexion TCP. Sous forte charge, les requêtes font la queue au niveau de l'OS avant même d'atteindre Express, ce temps d'attente n'est jamais mesuré. k6 lui mesure la latence end-to-end depuis le client, connection comprise.
+**Question 10** — Le panel mesure la latence **à l'intérieur** du service, à partir du moment où Node accepte la connexion TCP. Sous charge, les requêtes font la queue au niveau OS avant Express — ce temps n'est pas mesuré. k6 mesure la latence end-to-end depuis le client.
 
-C'est pour ça que k6 voit p95=2.45s alors que Grafana reste flat : Grafana ne voit que les requêtes qui ont déjà passé la file d'attente. Pour rectifier ça, il faudrait pousser les métriques k6 directement dans Prometheus via `k6 run --out experimental-prometheus-rw`, ou utiliser un Blackbox Exporter qui sonde les services depuis l'extérieur.
+D'où k6 = p95 2.45s mais Grafana flat — Grafana ne voit que les requêtes qui ont passé la file. Pour corriger : `k6 run --out experimental-prometheus-rw`, ou un Blackbox Exporter qui sonde depuis l'extérieur.
 
 ---
 
@@ -252,13 +253,11 @@ C'est pour ça que k6 voit p95=2.45s alors que Grafana reste flat : Grafana ne v
 
 ### Diagnostic du `ImagePullBackOff`
 
-**Question 1** — Après `kubectl apply -f k8s/base/user-service/`, le Terminal A affiche les pods en `ImagePullBackOff` au lieu de `1/1 Running`. Pour diagnostiquer, on regarde la section Events du pod :
+**Question 1** — Après `kubectl apply -f k8s/base/user-service/`, les pods sont en `ImagePullBackOff`. On regarde les Events :
 
 ```bash
 kubectl describe pod -l app=user-service -n staging
 ```
-
-Dans Events, Kubernetes remonte un message du type :
 
 ```
 Failed to pull image "mageas/taskflow-user-service:v0.0.1":
@@ -268,17 +267,17 @@ Warning  Failed     ErrImagePull
 Warning  Failed     ImagePullBackOff
 ```
 
-Kubernetes nous dit donc explicitement qu'il n'arrive pas à trouver l'image sur le registry distant — le tag `v0.0.1` du repo `mageas/taskflow-user-service` n'existe pas (ou n'est pas accessible). Je n'avait pas push l'image en arm.
+Le tag `v0.0.1` n'existe pas sur le registry. Je n'avais pas push l'image en arm.
 
 ---
 
-**Question 2** — La différence majeure avec le déploiement Docker Compose des TPs précédents : en Compose, la directive `build: ./user-service` construit l'image **localement** sur le daemon Docker de la machine, qui sert ensuite directement le conteneur. Aucun pull n'est nécessaire.
+**Question 2** — En Compose, `build: ./user-service` construit l'image **localement** sur le daemon Docker, qui sert directement le conteneur. Pas de pull.
 
-Sur kind, les nœuds du cluster tournent dans des conteneurs Docker isolés avec leur propre runtime containerd. Ils ne voient pas le daemon Docker local — l'image **doit donc venir d'un registry distant** (Docker Hub) ou être chargée explicitement dans le cluster. Ce qui manque concrètement, c'est que le tag `v0.0.1` n'a jamais été publié : le workflow `release.yml` ne se déclenche que sur `git push tag v*.*.*`, et aucun tag n'a été poussé depuis mon fork.
+Sur kind, les nœuds tournent dans des conteneurs Docker isolés avec leur propre containerd. Ils ne voient pas le daemon Docker local — l'image **doit venir d'un registry distant** ou être chargée explicitement. Concrètement, le tag `v0.0.1` n'avait pas été publié : `release.yml` ne se déclenche que sur `git push tag v*.*.*`.
 
 ### Correction
 
-Pour publier l'image sur mon propre Docker Hub, puis adapter `k8s/base/user-service/deployment.yaml` :
+Push de l'image sur Docker Hub puis update du deployment :
 
 ```bash
 git tag v0.0.3
@@ -289,9 +288,9 @@ git push origin v0.0.3
 image: mageas/taskflow-user-service:v0.0.3-arm64
 ```
 
-Avec en complément `imagePullPolicy: IfNotPresent` (déjà présent dans le manifest) pour que le kubelet ne tente pas de re-pull depuis Docker Hub.
+`imagePullPolicy: IfNotPresent` (déjà présent) pour éviter un re-pull.
 
-Il faut aussi ajouter les secrets avec :
+Création des secrets :
 ```bash
 kubectl create secret generic postgres-secret -n staging \
   --from-literal=POSTGRES_USER=admin \
@@ -301,7 +300,7 @@ kubectl create secret generic postgres-secret -n staging \
   --from-literal=JWT_SECRET='change-me-in-prod'
 ```
 
-Après application, les pods passent en `1/1 Running` :
+Pods en `1/1 Running` :
 
 ```bash
 kubectl get pods -n staging -o wide
@@ -316,9 +315,10 @@ user-service-6fd54dcb6b-5bzmv    1/1     Running   0          12s   taskflow-wor
 
 ## Étape 4 — Déployer PostgreSQL (StatefulSet)
 
-Les trois fichiers `k8s/base/postgres/` (`secret.yaml`, `service.yaml`, `statefulset.yaml`) ont été complétés : Secret avec `POSTGRES_USER/PASSWORD/DB` + `DATABASE_URL` + `JWT_SECRET`, Service **headless** (`clusterIP: None`) sur le port 5432, StatefulSet 1 replica avec `volumeClaimTemplates` (1Gi RWO), probes `pg_isready` et image `postgres:16-alpine`.
-
-Après `kubectl apply -f k8s/base/postgres/` :
+3 fichiers `k8s/base/postgres/` complétés :
+- `secret.yaml` : `POSTGRES_USER/PASSWORD/DB`, `DATABASE_URL`, `JWT_SECRET`.
+- `service.yaml` : headless (`clusterIP: None`) sur 5432.
+- `statefulset.yaml` : 1 replica, `volumeClaimTemplates` 1Gi RWO, probes `pg_isready`, image `postgres:16-alpine`.
 
 ```bash
 $ kubectl get pods -n staging -o wide
@@ -332,74 +332,74 @@ NAME                          STATUS   VOLUME    CAPACITY   ACCESS MODES
 postgres-data-postgres-0      Bound    pvc-...   1Gi        RWO
 ```
 
-3 pods en `Running` au total. Le pod du StatefulSet a un nom **ordinal stable** (`postgres-0`) et non un hash aléatoire comme les Deployments. Le PVC `postgres-data-postgres-0` a été créé automatiquement à partir du `volumeClaimTemplates` et est `Bound` à un PV provisionné par la `StorageClass standard` de kind. Le scheduler a placé `postgres-0` sur `taskflow-worker2` ; les replicas du `user-service` sont répartis sur les deux workers.
+3 pods Running. Le StatefulSet a un nom ordinal stable (`postgres-0`) au lieu d'un hash. Le PVC `postgres-data-postgres-0` est créé auto à partir du `volumeClaimTemplates`, Bound à un PV provisionné par la `StorageClass standard` de kind.
 
 ### Questions Deployment vs StatefulSet
 
-**Question 1** — La propriété qui garantit qu'un Pod conserve son volume au redémarrage / rescheduling est le couple **identité stable + `volumeClaimTemplates`**. Le StatefulSet attribue à chaque Pod un nom ordinal stable (`postgres-0`, `postgres-1`, …) et lui associe un PVC dédié dont le nom est dérivé de cet ordinal (`postgres-data-postgres-0`). Quand le Pod est supprimé puis recréé — sur le même nœud ou un autre — le contrôleur le **réassocie au même PVC**, donc au même PV (le PVC n'est pas détruit avec le Pod). Un Deployment, au contraire, génère des hashs aléatoires : à chaque recréation, le Pod perdrait toute corrélation avec un PVC précédent.
+**Question 1** — Identité stable + `volumeClaimTemplates`. Chaque Pod du StatefulSet a un nom ordinal (`postgres-0`, `postgres-1`...) et un PVC dédié (`postgres-data-postgres-0`). À la recréation, le contrôleur réassocie le Pod au même PVC (le PVC n'est pas détruit avec le Pod). Un Deployment génère des hashs aléatoires → aucune corrélation possible.
 
-**Question 2** — Un Deployment serait inadapté pour PostgreSQL pour plusieurs raisons :
+**Question 2** — Un Deployment serait inadapté pour Postgres :
 
-- **Pas d'identité stable** : avec `replicas: 1`, lors d'un rescheduling, le nouveau Pod (nouveau hash) pourrait tenter de monter un PVC `RWO` encore attaché à l'ancien Pod en cours d'arrêt → blocage `Multi-Attach error`.
-- **Stratégie de mise à jour incompatible** : un Deployment fait du rolling update (`maxSurge`), donc démarre un nouveau Pod **avant** d'arrêter l'ancien. Avec un volume `RWO` et une base de données, c'est interdit (deux processus PostgreSQL ne peuvent pas écrire sur le même répertoire de données simultanément).
-- **Pas d'ordre garanti** : si un jour on scale à plusieurs replicas (réplication primary/replica), un Deployment ne garantit aucun ordre de démarrage / terminaison. Un StatefulSet démarre `pod-0` → `pod-1` → `pod-2` séquentiellement, ce qui correspond exactement au besoin d'une base distribuée pour bootstrap.
-- **Pas de DNS stable** : le Service headless du StatefulSet expose chaque pod via `postgres-0.postgres.staging.svc` — utile pour la réplication. Un Deployment n'offre pas ça.
+- **Pas d'identité stable** : nouveau hash à la recréation → tentative de monter le PVC RWO encore attaché à l'ancien pod → `Multi-Attach error`.
+- **Stratégie de mise à jour incompatible** : rolling update démarre le nouveau pod **avant** d'arrêter l'ancien → 2 Postgres sur le même répertoire de données → interdit.
+- **Pas d'ordre garanti** : pour de la réplication primary/replica, il faut `pod-0` → `pod-1` → `pod-2` séquentiel. StatefulSet le garantit, Deployment non.
+- **Pas de DNS stable** : le Service headless du StatefulSet expose `postgres-0.postgres.staging.svc` — utile pour la réplication.
 
-**Question 3** — Parmi les services restants, **Redis** est le meilleur candidat à un StatefulSet en production. Dans cette stack, Redis sert de **bus de messages pub/sub** entre `task-service` (producer) et `notification-service` (subscriber). En staging on tolère une perte des données au redémarrage (d'où le Deployment dans l'étape 6), mais en production :
+**Question 3** — **Redis** est le meilleur candidat à un StatefulSet en prod. Ici Redis est un bus pub/sub entre `task-service` et `notification-service`. En staging on perd les données au redémarrage (d'où le Deployment), mais en prod :
 
-- Si on active la **persistance Redis** (RDB/AOF) pour ne pas perdre les messages en cas de crash, il faut un volume persistant stable → `volumeClaimTemplates`.
-- Si on passe à du **Redis en cluster** (Sentinel ou Redis Cluster pour la haute dispo), chaque nœud Redis a besoin d'une **identité réseau stable** pour être référencé par ses pairs → DNS stable du Service headless.
-- L'ordre de démarrage importe pour qu'un master élu reste le master après reschedule.
+- Persistance Redis (RDB/AOF) → volume stable → `volumeClaimTemplates`.
+- Redis cluster (Sentinel / Redis Cluster) → identité réseau stable pour que les nœuds se référencent → DNS stable du Service headless.
+- Ordre de démarrage : un master élu doit rester master après reschedule.
 
-Les autres services sont stateless et conviennent parfaitement à un Deployment :
-- `notification-service` : worker pub/sub sans état persistant local (l'abonnement Redis se reconstruit au démarrage).
-- `api-gateway` : proxy HTTP, aucun état entre requêtes.
-- `frontend` : nginx servant des fichiers statiques compilés, totalement immuable.
+Les autres restent stateless :
+- `notification-service` : worker pub/sub, pas d'état persistant local.
+- `api-gateway` : proxy HTTP stateless.
+- `frontend` : nginx + bundle React, immuable.
 
 ---
 
 ## Étape 5 — Déployer le `task-service` et le `notification-service`
 
-Les 6 fichiers ont été créés en s'appuyant sur le pattern du `user-service` :
+6 fichiers créés sur le pattern du `user-service` :
 
-- `k8s/base/task-service/` : ConfigMap (PORT 3002, REDIS_URL, OTEL), Deployment (image `taskflow-task-service`, probes `/health`, secret `postgres-secret` pour `DATABASE_URL` et `JWT_SECRET`), Service ClusterIP sur 3002.
-- `k8s/base/notification-service/` : ConfigMap (PORT 3003, REDIS_URL, OTEL), Deployment (image `taskflow-notification-service`, probes `/health`, **pas de DATABASE_URL** car le service stocke ses notifications en mémoire), Service ClusterIP sur 3003.
+- `k8s/base/task-service/` : ConfigMap (PORT 3002, REDIS_URL, OTEL), Deployment (image `taskflow-task-service`, probes `/health`, secret `postgres-secret`), Service ClusterIP 3002.
+- `k8s/base/notification-service/` : ConfigMap (PORT 3003, REDIS_URL, OTEL), Deployment (image `taskflow-notification-service`, probes `/health`, **pas de DATABASE_URL** — notifications stockées en mémoire), Service ClusterIP 3003.
 
-Après `kubectl apply -f k8s/base/task-service/ -f k8s/base/notification-service/`, tous les pods passent en `1/1 Running`.
+Tous les pods en `1/1 Running` après apply.
 
 ### Choix du nombre de replicas
 
-**Question 1 — Comment le `notification-service` consomme-t-il les événements Redis ?**
+**Question 1 — Comment le `notification-service` consomme les événements Redis ?**
 
-Dans `notification-service/src/subscriber.js`, le service utilise l'API **Pub/Sub native de Redis** : `subscriber.subscribe('task.created', callback)` et `subscriber.subscribe('task.status_changed', callback)`. Chaque instance ouvre sa propre connexion Redis et s'abonne aux deux canaux. Les notifications produites sont stockées dans un **tableau en mémoire** (`const notifications = []`), pas dans une base partagée.
+Dans `notification-service/src/subscriber.js` : API Pub/Sub native Redis. `subscriber.subscribe('task.created', cb)` et `subscriber.subscribe('task.status_changed', cb)`. Chaque instance ouvre sa propre connexion. Notifications stockées dans un tableau en mémoire (`const notifications = []`).
 
 **Question 2 — Implication sur le nombre de replicas ?**
 
-Le Pub/Sub Redis est un broadcast : **tout subscriber abonné à un canal reçoit une copie de chaque message publié**. Contrairement à un Redis Stream avec consumer group (où Redis distribue les messages entre consommateurs), il n'y a aucune répartition de charge.
+Pub/Sub Redis = broadcast : **tout subscriber reçoit une copie de chaque message**. Pas de répartition de charge (contrairement à un Stream + consumer group).
 
-Concrètement, si on déploie 2 replicas du `notification-service`, chaque `task.created` publié par le `task-service` est livré aux **2 replicas en parallèle** : la notification est stockée 2 fois (dans deux tableaux en mémoire distincts), et la métrique `notifications_sent_total` est incrémentée 2 fois. À la lecture, le client appelle un seul replica au hasard via le Service ClusterIP et obtient une vue partielle des notifications selon celui qu'il a touché.
+Avec 2 replicas, chaque `task.created` est livré aux 2 → notification stockée 2 fois (tableaux en mémoire distincts) + métrique incrémentée 2 fois. À la lecture, le client tape un replica au hasard via le Service → vue partielle.
 
 **Question 3 — Justification**
 
-Le `notification-service` est donc fixé à **`replicas: 1`**. Tant que les notifications restent stockées en mémoire et que le pub/sub Redis est utilisé sans consumer group, scaler horizontalement crée des doublons et casse la lecture. Pour pouvoir scaler, il faudrait soit migrer vers Redis Streams + consumer group (un seul replica traite chaque message), soit persister les notifications dans une base partagée (Postgres) pour que chaque replica voie le même état.
+`notification-service` à `replicas: 1`. Pour scaler, il faudrait soit Redis Streams + consumer group, soit persister en base partagée (Postgres).
 
-Les autres services sont eux scalables sans souci :
-- `task-service` reste à `replicas: 2` : c'est un service HTTP stateless, l'état est dans Postgres et la publication Redis est un fire-and-forget côté producer (aucune duplication possible côté publisher).
-- `user-service` reste à `replicas: 2` pour les mêmes raisons.
+Les autres restent à 2 :
+- `task-service` : HTTP stateless, état dans Postgres, publish Redis = fire-and-forget côté producer.
+- `user-service` : pareil.
 
 ---
 
 ## Étape 6 — Déployer Redis (Deployment)
 
-Les deux fichiers `k8s/base/redis/` ont été complétés : Deployment 1 replica avec l'image `redis:7-alpine` sur le port 6379, et Service ClusterIP sur 6379.
+2 fichiers `k8s/base/redis/` : Deployment 1 replica, image `redis:7-alpine` sur 6379, Service ClusterIP 6379.
 
 ### Choix d'un Deployment plutôt qu'un StatefulSet
 
-Cohérent avec la justification de l'étape 4 (question 3) : en staging on tolère la perte des données Redis au redémarrage. Le pub/sub Redis est un broadcast en mémoire, sans persistance par défaut — un message non livré au moment de la publication est perdu de toute façon. Pas de volume → pas besoin de l'identité stable d'un StatefulSet.
+Cohérent avec étape 4 Q3 : en staging on tolère la perte de données. Pub/sub = broadcast en mémoire sans persistance par défaut — un message non livré au moment du publish est perdu de toute façon. Pas de volume → pas besoin de StatefulSet.
 
 ### Adaptation de la `readinessProbe`
 
-Redis n'expose pas d'endpoint HTTP `/health` comme les services Node : c'est un serveur TCP qui parle le protocole RESP. La probe utilise donc un `exec` qui lance `redis-cli ping` dans le conteneur — Redis répond `PONG` quand il est prêt à accepter des connexions, ce qui valide à la fois que le process est démarré et qu'il a fini son chargement initial.
+Redis ne parle pas HTTP, il parle RESP. Probe en `exec` qui lance `redis-cli ping` → Redis répond `PONG` quand prêt :
 
 ```yaml
 readinessProbe:
@@ -409,9 +409,9 @@ readinessProbe:
   periodSeconds: 10
 ```
 
-Une alternative aurait été un `tcpSocket` sur le port 6379 — plus léger mais moins précis : il valide que le port est ouvert sans vérifier que Redis répond effectivement aux commandes.
+Alternative : `tcpSocket` sur 6379 — plus léger mais valide juste l'ouverture du port, pas la commande.
 
-Après `kubectl apply -f k8s/base/redis/`, le pod Redis passe en `1/1 Running` et le `notification-service` peut s'abonner aux canaux `task.created` et `task.status_changed` via le DNS interne `redis:6379`.
+Pod en `1/1 Running` après apply, le `notification-service` s'abonne aux canaux via `redis:6379`.
 
 ---
 
@@ -419,34 +419,26 @@ Après `kubectl apply -f k8s/base/redis/`, le pod Redis passe en `1/1 Running` e
 
 ### `api-gateway`
 
-Trois fichiers créés dans `k8s/base/api-gateway/` :
-- **ConfigMap** : `PORT=3000`, les trois URLs internes (`USER_SERVICE_URL=http://user-service:3001`, `TASK_SERVICE_URL=http://task-service:3002`, `NOTIFICATION_SERVICE_URL=http://notification-service:3003`) et la conf OTEL.
-- **Deployment** : 2 replicas, image `taskflow-api-gateway`, `JWT_SECRET` injecté depuis `postgres-secret`, probes HTTP sur `/health` (port 3000).
-- **Service** : ClusterIP sur 3000.
+3 fichiers dans `k8s/base/api-gateway/` :
+- **ConfigMap** : `PORT=3000`, URLs internes (`USER_SERVICE_URL=http://user-service:3001`, `TASK_SERVICE_URL=http://task-service:3002`, `NOTIFICATION_SERVICE_URL=http://notification-service:3003`), conf OTEL.
+- **Deployment** : 2 replicas, image `taskflow-api-gateway`, `JWT_SECRET` depuis `postgres-secret`, probes `/health` sur 3000.
+- **Service** : ClusterIP 3000.
 
 ### `frontend`
 
-Deux fichiers créés dans `k8s/base/frontend/` :
-- **Deployment** : 2 replicas, image `taskflow-frontend` (nginx + bundle React précompilé), probes HTTP sur `/` (port 80). Aucun ConfigMap nécessaire — la conf nginx est embarquée dans l'image et le proxy `/api` → `api-gateway:3000` est résolu via le DNS Kubernetes.
-- **Service** : ClusterIP sur 80.
+2 fichiers dans `k8s/base/frontend/` :
+- **Deployment** : 2 replicas, image `taskflow-frontend` (nginx + bundle React), probes `/` sur 80. Pas de ConfigMap — la conf nginx est embarquée et `/api` → `api-gateway:3000` se résout via le DNS Kube.
+- **Service** : ClusterIP 80.
 
-### Justification des choix (replicas et ressources)
+### Justification (replicas et ressources)
 
-**`api-gateway`** :
-1. **À quoi sert-il ?** Logique métier : reverse-proxy HTTP qui authentifie les requêtes (vérification JWT) et les route vers le bon service interne.
-2. **État partagé ?** Aucun. Chaque requête est traitée indépendamment, le JWT contient toute l'information utilisateur. Scaler horizontalement est sans risque.
-3. **Impact d'une indisponibilité ?** Critique : c'est le **point d'entrée unique**. Si l'`api-gateway` tombe, toute l'API est inaccessible — d'où `replicas: 2` minimum pour qu'un pod puisse encaisser le trafic pendant qu'un autre redémarre.
-4. **Code à chaque requête ?** Oui : Node parse le JSON, valide le JWT (HMAC-SHA256), reproxie en HTTP. CPU bound modéré → `requests: 100m / 128Mi`, `limits: 200m / 256Mi`, identique aux autres services Node.
+**`api-gateway`** : reverse-proxy qui valide le JWT et route vers les services internes. Stateless (le JWT contient toute l'info). Point d'entrée unique → `replicas: 2` pour la résilience. Node parse JSON + valide HMAC-SHA256 + reproxie HTTP → `requests: 100m / 128Mi`, `limits: 200m / 256Mi`.
 
-**`frontend`** :
-1. **À quoi sert-il ?** Fichiers statiques. nginx sert un bundle React précompilé + reverse-proxie `/api` vers l'`api-gateway`.
-2. **État partagé ?** Aucun. Tous les replicas servent les mêmes fichiers immuables issus de l'image.
-3. **Impact d'une indisponibilité ?** Modéré : l'API continue à tourner mais l'UI est inaccessible. `replicas: 2` aussi pour la résilience.
-4. **Code à chaque requête ?** Quasiment rien : nginx lit un fichier sur le disque ou forward un proxy_pass — pas de runtime applicatif. Ressources très basses → `requests: 25m / 32Mi`, `limits: 100m / 64Mi`.
+**`frontend`** : nginx qui sert un bundle React + proxy `/api`. Stateless, fichiers immuables. UI down = API utilisable mais pas l'interface → `replicas: 2`. nginx fait quasi rien à chaque requête → `requests: 25m / 32Mi`, `limits: 100m / 64Mi`.
 
-L'écart de ressources entre `api-gateway` (Node, CPU/mémoire modéré) et `frontend` (nginx, quasi rien) reflète directement la nature des deux services : exécution de logique vs. service de fichiers statiques.
+L'écart de ressources reflète la différence : exécution de logique vs. fichiers statiques.
 
-Après `kubectl apply -f k8s/base/api-gateway/ -f k8s/base/frontend/`, les 4 pods (`api-gateway` ×2, `frontend` ×2) passent en `1/1 Running`.
+4 pods (`api-gateway` ×2, `frontend` ×2) en `1/1 Running` après apply.
 
 ---
 
@@ -456,17 +448,17 @@ Après `kubectl apply -f k8s/base/api-gateway/ -f k8s/base/frontend/`, les 4 pod
 kubectl get all -n staging
 ```
 
-Tous les pods sont attendus en `1/1 Running` :
+11 pods en `1/1 Running` :
 
-- `postgres-0` (StatefulSet, 1 replica)
-- `redis-*` (Deployment, 1 replica)
+- `postgres-0` (StatefulSet, 1)
+- `redis-*` (Deployment, 1)
 - `user-service-*` ×2
 - `task-service-*` ×2
-- `notification-service-*` ×1 (cf. justification étape 5)
+- `notification-service-*` ×1
 - `api-gateway-*` ×2
 - `frontend-*` ×2
 
-Soit **11 pods** au total, répartis sur les workers `taskflow-worker` et `taskflow-worker2` par le scheduler.
+Répartis sur `taskflow-worker` et `taskflow-worker2`.
 
 ![alt text](screenshots/k8s-all-running.png)
 
@@ -476,13 +468,11 @@ Soit **11 pods** au total, répartis sur les workers `taskflow-worker` et `taskf
 kubectl logs -n staging deployment/task-service
 ```
 
-Les logs des services Node remontent des erreurs récurrentes du type :
-
 ```
 Error: connect ECONNREFUSED otel-collector:4318
 ```
 
-C'est attendu : la stack d'observabilité (OTel Collector, Tempo, Prometheus, Grafana, Loki) est définie dans `docker-compose.infra.yaml` et n'a pas été portée en manifests Kubernetes dans ce TP. L'instrumentation OTel des services tente de pousser les traces et métriques toutes les 10 secondes, échoue, et logue l'erreur — sans impact sur le traitement des requêtes HTTP. La porter sur k8s nécessiterait des manifests pour Tempo, Prometheus, Grafana et le Collector, plus une intégration via `ServiceMonitor` (Prometheus Operator) pour la découverte dynamique des targets.
+Attendu : la stack d'observabilité est dans `docker-compose.infra.yaml` et n'a pas été portée en manifests Kube. Les services tentent de pousser les traces toutes les 10s, échouent, loguent. Pas d'impact sur les requêtes HTTP. Pour la porter : manifests Tempo / Prometheus / Grafana / Collector + `ServiceMonitor` (Prometheus Operator) pour la découverte dynamique.
 
 ---
 
@@ -490,25 +480,25 @@ C'est attendu : la stack d'observabilité (OTel Collector, Tempo, Prometheus, Gr
 
 ### Inscription depuis l'interface
 
-**Question 1 — Est-ce que l'inscription fonctionne ?**
+**Question 1 — L'inscription fonctionne ?**
 
-Non. Le formulaire échoue avec une erreur 500 côté front : le `POST /api/users/register` retourne une erreur serveur.
+Non. 500 sur `POST /api/users/register`.
 
-**Question 2 — Remontée des logs et accès à PostgreSQL**
+**Question 2 — Logs et accès à PostgreSQL**
 
-Investigation en remontant la chaîne. D'abord l'`api-gateway` :
+D'abord l'`api-gateway` :
 
 ```bash
 kubectl logs -n staging deployment/api-gateway --tail=50
 ```
 
-Aucune trace du `register` côté gateway, seulement les `/health` des probes. Le proxy ne logue pas les requêtes réussies au niveau info — il forward et c'est tout. On descend au `user-service` (avec `-l` pour agréger les 2 replicas) :
+Pas de trace du `register`, juste les `/health`. Le proxy ne logue pas les requêtes réussies. On descend au `user-service` :
 
 ```bash
 kubectl logs -n staging -l app=user-service --tail=200 | grep -iE "error|register"
 ```
 
-On y trouve bien le `POST /users/register` mais avec une erreur peu informative :
+Le 500 est là, mais peu informatif :
 
 ```json
 {
@@ -520,7 +510,7 @@ On y trouve bien le `POST /users/register` mais avec une erreur peu informative 
 }
 ```
 
-C'est pino-http qui logue génériquement le 500 — l'erreur SQL réelle n'apparaît pas. En relisant `user-service/src/routes.js`, on comprend pourquoi :
+C'est pino-http qui logue génériquement — l'erreur SQL réelle n'apparaît pas. Dans `routes.js` :
 
 ```js
 } catch (err) {
@@ -529,23 +519,21 @@ C'est pino-http qui logue génériquement le 500 — l'erreur SQL réelle n'appa
 }
 ```
 
-Le `catch` swallow l'erreur sans la logger. Pour voir la cause réelle, il faut inspecter directement la base. Le Service `postgres:5432` est ClusterIP, donc inaccessible depuis l'hôte — on ouvre un port-forward :
+Le `catch` swallow l'erreur. Pour voir la cause, accès direct à la base. Le Service `postgres:5432` est ClusterIP → port-forward :
 
 ```bash
 kubectl port-forward -n staging svc/postgres 5432:5432
 ```
 
-Puis `psql` depuis la machine :
-
 ```bash
 PGPASSWORD=admin psql -h localhost -U admin -d taskflow -c "\dt"
 ```
 
-Résultat : `Did not find any relations.` Aucune table dans la base. L'`INSERT INTO users` du register tape sur une table qui n'existe pas — d'où le 500.
+`Did not find any relations.` Aucune table. L'`INSERT INTO users` tape sur une table inexistante → 500.
 
 **Question 3 — Comparaison avec `docker-compose.yaml`**
 
-Dans `docker-compose.yml`, le service postgres monte explicitement le script d'init :
+Dans le compose, le service postgres monte explicitement le script d'init :
 
 ```yaml
 volumes:
@@ -553,13 +541,13 @@ volumes:
   - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
 ```
 
-Le bind mount `./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql` exploite une convention de l'image officielle `postgres` : tout fichier `*.sql` ou `*.sh` placé dans `/docker-entrypoint-initdb.d/` est exécuté **au premier démarrage** quand le data directory est vide. C'est ce qui crée les tables `users`, `tasks`, `notifications` et insère Alice et Bob.
+L'image officielle `postgres` exécute tout `*.sql`/`*.sh` placé dans `/docker-entrypoint-initdb.d/` au premier démarrage si le data directory est vide → création des tables `users`, `tasks`, `notifications` + insertion d'Alice et Bob.
 
-Mon StatefulSet d'origine ne montait que le PVC pour les données, **pas le script d'init**. Conséquence : la base démarre vide, schéma absent, register en erreur 500.
+Mon StatefulSet ne montait que le PVC, pas le script d'init. Base vide → 500.
 
 ### Correction
 
-Création d'un ConfigMap `postgres-init` qui contient le contenu de `scripts/init.sql`, puis montage dans le pod au chemin attendu par l'image officielle :
+ConfigMap `postgres-init` qui contient `scripts/init.sql`, monté dans le pod :
 
 `k8s/base/postgres/init-configmap.yaml` :
 
@@ -576,7 +564,7 @@ data:
     CREATE TABLE IF NOT EXISTS notifications (...);
 ```
 
-Mise à jour du `statefulset.yaml` :
+Update du `statefulset.yaml` :
 
 ```yaml
 volumeMounts:
@@ -591,7 +579,7 @@ volumes:
       name: postgres-init
 ```
 
-⚠️ **Important** : `/docker-entrypoint-initdb.d/` n'est exécuté que si le data directory est vide. Comme le PVC contient déjà des données du premier démarrage, il faut le supprimer pour que l'init re-tourne :
+⚠️ `/docker-entrypoint-initdb.d/` ne tourne que si le data directory est vide. Comme le PVC contient déjà le précédent démarrage, il faut le supprimer :
 
 ```bash
 kubectl delete -f k8s/base/postgres/
@@ -599,47 +587,29 @@ kubectl delete pvc -n staging postgres-data-postgres-0
 kubectl apply -f k8s/base/postgres/
 ```
 
-Après recréation, `\dt` montre les 3 tables, et l'inscription depuis l'interface réussit.
+`\dt` montre les 3 tables, l'inscription marche.
 
 ### Service vs Ingress
 
-**Question 1 — Pourquoi `localhost:5432` ne fonctionne pas sans port-forward ?**
+**Question 1 — Pourquoi `localhost:5432` ne marche pas sans port-forward ?**
 
-Le Service `postgres` est de type `ClusterIP` (le défaut). Un ClusterIP attribue une IP virtuelle **uniquement routable à l'intérieur du cluster** — kube-proxy crée des règles iptables/IPVS sur chaque nœud pour rediriger cette IP vers les endpoints des pods. Cette IP n'est pas exposée sur l'hôte de la machine.
+Le Service `postgres` est en `ClusterIP` : IP virtuelle routable seulement à l'intérieur du cluster (kube-proxy + iptables sur chaque nœud). Pas exposée sur l'hôte.
 
-Par ailleurs, le mapping `extraPortMappings` de kind ne forward sur l'hôte que les ports 80/443 du `taskflow-control-plane` (pour l'Ingress). Aucun mapping n'a été défini pour le 5432, et même si on en ajoutait un, ça ne résoudrait pas vers le Service Postgres — kind n'expose que les ports en `NodePort` ou via l'Ingress controller.
+Le `extraPortMappings` de kind expose juste 80/443 du `taskflow-control-plane` pour l'Ingress — pas le 5432.
 
-`kubectl port-forward svc/postgres 5432:5432` contourne tout ça : kubectl ouvre un tunnel TCP local-vers-cluster via l'API Server, qui se charge de relayer le trafic au pod cible. C'est pratique pour du debug ponctuel, pas une solution à laisser tourner en prod.
+`kubectl port-forward` ouvre un tunnel TCP via l'API Server qui relaie au pod. Debug ponctuel, pas de la prod.
 
-**Question 2 — Qui fait le routage HTTP décrit par l'Ingress ?**
+**Question 2 — Qui fait le routage HTTP de l'Ingress ?**
 
-L'objet `Ingress` lui-même n'est qu'**une déclaration de routage** — un manifest YAML stocké dans etcd. Sans contrôleur pour le lire, il ne fait strictement rien.
+L'objet `Ingress` est juste une déclaration YAML dans etcd — il ne fait rien sans contrôleur. Le routage est assuré par l'**ingress-nginx-controller** (namespace `ingress-nginx`). Le controller watch l'API Kube, traduit chaque `Ingress` en blocs `server { location ... proxy_pass ... }` NGINX, recharge à chaud.
 
-Le routage est effectivement assuré par l'**ingress-nginx-controller**, déployé via :
-
-```bash
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
-```
-
-Ce manifest crée un Deployment dans le namespace `ingress-nginx` qui contient un binaire NGINX + un agent Go (le controller) qui watch l'API Kubernetes. Quand un objet `Ingress` est créé/modifié, le controller le traduit en blocs `server { ... location /api { proxy_pass ... } }` dans la conf NGINX et la recharge à chaud.
-
-Pour qu'il soit joignable depuis l'hôte, on l'a forcé à se scheduler sur `taskflow-control-plane` (`nodeSelector: ingress-ready: "true"`) — seul nœud où kind a configuré `extraPortMappings` pour exposer 80/443 sur la machine. C'est NGINX qui reçoit chaque requête sur `localhost:80`, lit le path et la forwarde au Service approprié.
+`nodeSelector: ingress-ready: "true"` force le scheduling sur `taskflow-control-plane`, seul nœud où kind expose 80/443 sur l'hôte.
 
 **Question 3 — Qui load-balance entre les replicas de `task-service` ?**
 
-Ce n'est **ni l'Ingress ni le controller NGINX** : c'est le **Service ClusterIP** `task-service` lui-même, via **kube-proxy**.
+Pas l'Ingress, pas NGINX : le **Service ClusterIP** via **kube-proxy**. Pour `GET /api/tasks` : kind → pod nginx → match `/api` → proxy vers `api-gateway:3000` → CoreDNS → IP virtuelle → kube-proxy redirige (round-robin iptables) vers un des 2 replicas. Idem pour `task-service:3002`.
 
-Le flow concret pour une requête `GET /api/tasks` :
-
-1. Le client tape `http://localhost/api/tasks` → kind forward le port 80 vers le pod `ingress-nginx-controller`.
-2. NGINX matche la règle `/api` dans le manifest `Ingress` → il proxy vers `api-gateway:3000` (nom DNS du Service).
-3. CoreDNS résout `api-gateway` en l'IP virtuelle ClusterIP du Service.
-4. **kube-proxy** intercepte la connexion sur cette IP via ses règles iptables et la redirige vers **un pod au hasard** parmi les endpoints du Service (round-robin / random selon le mode).
-5. L'`api-gateway` valide le JWT puis appelle `http://task-service:3002/tasks` — même mécanisme : CoreDNS → ClusterIP → kube-proxy → un des 2 replicas `task-service`.
-
-Le load balancing se fait donc à **chaque saut de Service**, au niveau L4 (TCP), par kube-proxy. NGINX ne sait même pas que le `task-service` a 2 replicas — il ne voit que l'IP virtuelle du Service `api-gateway`.
-
-**Implication sur le rôle de l'Ingress** : l'Ingress n'est **pas un load balancer applicatif**, c'est un **routeur HTTP L7 d'entrée** (host/path → Service). Le vrai load balancing inter-replicas est délégué aux Services. C'est aussi pour ça que dans cette stack, retirer l'Ingress ne casserait pas la communication interne entre services — seul l'accès depuis l'extérieur disparaîtrait.
+LB à chaque saut de Service, en L4. NGINX ne voit que l'IP du Service. L'Ingress = routeur HTTP L7 d'entrée (host/path → Service), pas un LB applicatif.
 
 ---
 
@@ -651,25 +621,23 @@ Le load balancing se fait donc à **chaque saut de Service**, au niveau L4 (TCP)
 kubectl delete pod -n staging -l app=task-service
 ```
 
-Dans le Terminal A, on observe en temps réel :
+Dans le Terminal A :
 
 1. Les 2 pods `task-service-*` passent en `Terminating`.
-2. Quasi instantanément, 2 nouveaux pods `task-service-*` (avec un nouveau hash) apparaissent en `Pending`, puis `ContainerCreating`, puis `Running` une fois la readiness probe verte.
-3. Quelques secondes plus tard, l'état stable est rétabli : 2 pods `task-service` en `1/1 Running`, mais avec un `AGE` très récent (31s sur le screenshot) comparé aux autres services restés intacts (9m+).
+2. 2 nouveaux pods (nouveau hash) apparaissent en `Pending` → `ContainerCreating` → `Running` une fois la readiness verte.
+3. État stable rétabli, mais avec un `AGE` récent (31s) vs les autres services intacts (9m+).
 
 ![alt text](screenshots/k8s-self-healing.png)
 
-**Pourquoi Kubernetes recrée les Pods ?**
+**Pourquoi Kube recrée les pods ?**
 
-C'est le rôle du **Deployment controller** combiné au **ReplicaSet** sous-jacent. Le Deployment `task-service` déclare `replicas: 2` — c'est un **état désiré** stocké dans etcd, pas une commande one-shot. Le contrôleur tourne en boucle (reconciliation loop) et compare en permanence l'état réel (combien de pods avec le label `app=task-service` sont `Running`) à l'état désiré (2).
+Deployment controller + ReplicaSet. Le Deployment déclare `replicas: 2` = état désiré dans etcd. Le contrôleur réconcilie en boucle.
 
-Quand on supprime les pods avec `kubectl delete`, le ReplicaSet détecte immédiatement qu'il manque 2 pods par rapport à la spec, et en crée 2 nouveaux pour réconcilier. C'est le principe **declarative + control loop** au cœur de Kubernetes : on ne dit pas "fais X", on dit "voici l'état que je veux", et un contrôleur s'occupe de faire converger la réalité vers cette cible.
-
-C'est aussi ce qui explique le **self-healing automatique en cas de crash** : si un pod plante (OOMKilled, segfault, exit 1, nœud qui tombe), le même mécanisme le recrée sans intervention humaine. Le seul cas où l'auto-recovery échoue est si la spec elle-même est invalide (image inexistante, `requests` qu'aucun nœud ne peut satisfaire, etc.) — d'où l'intérêt de monitorer la colonne `READY` pour détecter ces cas.
+`kubectl delete` retire les pods → ReplicaSet voit l'écart → crée 2 nouveaux. Même mécanisme pour le self-healing crash (OOMKilled, exit 1, nœud down). Échoue uniquement si la spec est invalide (image inexistante, `requests` irréalisables).
 
 ### Scénario 2 — Readiness probe
 
-Modification du `k8s/base/task-service/deployment.yaml` avec un path inexistant, puis recréation du cluster from scratch :
+Modif du `deployment.yaml` avec un path inexistant + recréation du cluster :
 
 ```yaml
 readinessProbe:
@@ -685,7 +653,7 @@ kubectl create namespace staging
 kubectl apply -f k8s/base/ --recursive
 ```
 
-⚠️ **Piège** : `kind delete` détruit aussi le namespace `ingress-nginx` et le patch `nodeSelector` qu'on avait appliqué. `localhost` ne répond plus tant qu'on n'a pas réinstallé le controller :
+⚠️ `kind delete` détruit aussi `ingress-nginx` et le patch `nodeSelector`. À réinstaller :
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
@@ -695,11 +663,9 @@ kubectl patch deployment ingress-nginx-controller -n ingress-nginx \
 kubectl rollout status deployment/ingress-nginx-controller -n ingress-nginx
 ```
 
-Le manifest `k8s/base/ingress.yaml` est lui ré-appliqué automatiquement par le `--recursive` du bloc précédent.
-
 **Question 1 — État des pods `task-service` ?**
 
-Les 2 pods passent en `STATUS: Running` (le process Node démarre normalement) mais restent bloqués en `READY: 0/1`. Le kubelet fait un `GET /does-not-exist` toutes les 10s, Express répond systématiquement `404 Not Found` → la probe est marquée failed. Tant que la readiness ne passe pas, Kubernetes considère le pod comme **pas prêt à recevoir du trafic** et le retire des `Endpoints` du Service `task-service`.
+`STATUS: Running` mais `READY: 0/1`. Le kubelet `GET /does-not-exist` toutes les 10s → 404 → probe failed → pod retiré des `Endpoints`.
 
 ```bash
 kubectl get endpoints -n staging task-service
@@ -707,24 +673,21 @@ NAME           ENDPOINTS   AGE
 task-service   <none>      2m
 ```
 
-Pas d'IP listée — confirmé : le Service n'a aucun backend.
+Pas d'IP → Service sans backend.
 
 **Question 2 — Quels services répondent ?**
 
-- **Login** (`POST /api/users/login`) : ✅ fonctionne. Le `user-service` n'est pas affecté, sa propre readiness sur `/health` est OK, le Service `user-service` a bien ses 2 endpoints.
-- **GET /api/tasks** et **POST /api/tasks** : ❌ échouent avec un 502 / 503. Le flow est api-gateway → Service `task-service` → endpoints **vides** → l'appel HTTP du proxy ne trouve personne au bout du fil. Le `http-proxy-middleware` côté api-gateway logue un `proxy error` et incrémente `upstream_errors_total{service="task-service"}`.
-- **GET /api/notifications** : ✅ fonctionne (notification-service indépendant).
+Login (`POST /api/users/login`) et `GET /api/notifications` : OK, leurs Endpoints sont peuplés. `GET /api/tasks` et `POST /api/tasks` : 502 — proxy api-gateway → Service vide. `http-proxy-middleware` logue un `proxy error` et incrémente `upstream_errors_total{service="task-service"}`.
 
-L'app est donc **partiellement fonctionnelle** : on peut s'authentifier et lire les notifications, mais pas interagir avec les tâches. C'est exactement le but d'une readiness probe : isoler proprement les replicas pas prêts sans casser le reste.
+App partiellement fonctionnelle : auth + notifications OK, tâches KO. C'est ce que la readiness garantit — isoler les replicas pas prêts sans casser le reste.
 
 **Question 3 — Après remise du path à `/health`**
 
 ```bash
-# Edit deployment.yaml puis :
 kubectl apply -f k8s/base/task-service/deployment.yaml
 ```
 
-Le rolling update démarre : Kubernetes crée 2 nouveaux pods avec le bon path, attend qu'ils passent en `READY: 1/1`, puis termine les anciens. Une fois stabilisé :
+Rolling update : 2 nouveaux pods avec le bon path → `READY: 1/1` → termine les anciens.
 
 ```bash
 kubectl get endpoints -n staging task-service
@@ -732,41 +695,36 @@ NAME           ENDPOINTS                    AGE
 task-service   10.244.1.21:3002,10.244.2.18:3002   3m
 ```
 
-Les 2 IPs sont de retour dans les endpoints. La création de tâche depuis l'UI réussit (201 Created), la trace dans Tempo montre bien le span `POST /tasks` côté `task-service`.
+2 IPs de retour. Création de tâche en 201, span `POST /tasks` visible dans Tempo.
 
 ### Readiness probe vs Liveness probe
 
 | | Readiness | Liveness |
 |---|---|---|
-| **Question répondue** | "Est-ce que le pod est prêt à recevoir du trafic ?" | "Est-ce que le pod est encore vivant ou bloqué ?" |
-| **Action si la probe échoue** | Le pod est retiré des `Endpoints` du Service. Aucun trafic ne lui est envoyé, mais il **n'est ni tué ni redémarré**. Dès que la probe repasse, il est réinjecté dans les endpoints. | Le kubelet **tue le conteneur** (SIGTERM puis SIGKILL après le grace period). Le Pod redémarre via la `restartPolicy: Always`, le compteur `RESTARTS` s'incrémente. |
-| **Cas d'usage** | Démarrage lent (warm-up, chargement de cache), dépendance temporairement indisponible, surcharge transitoire. | Process bloqué (deadlock, fuite mémoire, boucle infinie) qu'un redémarrage corrige. |
+| **Question** | Prêt à recevoir du trafic ? | Encore vivant ou bloqué ? |
+| **Si échoue** | Retiré des `Endpoints`. Ni tué ni redémarré. Réinjecté dès que la probe repasse. | Conteneur tué (SIGTERM puis SIGKILL). Pod redémarré, `RESTARTS` s'incrémente. |
+| **Cas d'usage** | Démarrage lent, dépendance temporairement KO, surcharge transitoire. | Process bloqué (deadlock, fuite mémoire) qu'un restart corrige. |
 
-**Que serait-il arrivé avec une liveness probe cassée à la place ?**
+**Que se serait-il passé avec une liveness cassée ?**
 
-Catastrophe en boucle. Avec `livenessProbe.path: /does-not-exist`, à chaque check (toutes les 20s d'après notre conf) le kubelet aurait reçu un 404 → tué le conteneur → le ReplicaSet l'aurait recréé → nouveau conteneur démarre → nouveau check → 404 → tué à nouveau, etc.
+Boucle infernale. À chaque check, kubelet → 404 → conteneur tué → ReplicaSet recrée → check → 404 → tué. `RESTARTS` explose, pod en `CrashLoopBackOff` avec backoff exponentiel (10s, 20s, 40s..., max 5 min). Pendant les fenêtres `Running`, la readiness `/health` repasse vert quelques secondes → pod réintégré aux endpoints → reçoit du trafic → tué au check suivant. Connexions abruptement coupées côté client.
 
-Concrètement :
-- La colonne `RESTARTS` exploserait : `1`, `2`, `3`, ... à chaque cycle.
-- Après quelques restarts rapprochés, Kubernetes applique un **backoff exponentiel** et le pod passe en `STATUS: CrashLoopBackOff` avec des intervalles de redémarrage croissants (10s, 20s, 40s, ..., max 5 min).
-- Pendant les fenêtres `Running`, la readiness sur `/health` (intacte) repasse vert quelques secondes → le pod réintègre les endpoints → reçoit du trafic → est tué au check suivant → le client voit une connexion abruptement coupée.
-
-À retenir : **un mauvais path sur la readiness dégrade silencieusement l'app** (les pods sont juste hors-jeu, on peut investiguer tranquillement). **Un mauvais path sur la liveness** met les pods en `CrashLoopBackOff` permanent — c'est plus visible mais beaucoup plus brutal pour l'utilisateur. C'est aussi pour ça qu'on configure typiquement la liveness avec des seuils plus tolérants que la readiness (`failureThreshold` plus élevé, `initialDelaySeconds` plus long).
+Readiness cassée = dégradation silencieuse (pods hors-jeu, on investigue). Liveness cassée = `CrashLoopBackOff` permanent. D'où des seuils plus tolérants sur la liveness (`failureThreshold` plus haut, `initialDelaySeconds` plus long).
 
 
 ### Scénario 3 — Rolling update
 
-**Que voyez-vous dans la colonne `CHANGE-CAUSE` ? Est-ce utile ?**
+**`CHANGE-CAUSE` ?**
 
 ```bash
 kubectl rollout history -n staging deployment/frontend
 ```
 
-La colonne affiche `<none>` pour toutes les révisions. C'est **inutile en l'état** : sans annotation, l'historique me dit juste qu'il y a eu N rollouts, pas pourquoi ni vers quoi. Impossible de savoir lequel correspond au passage en `v0.0.4-arm64` (thème rose/violet) sans aller checker manuellement le tag d'image de chaque ReplicaSet sous-jacent.
+Affiche `<none>` partout. Inutile en l'état — on sait qu'il y a eu N rollouts mais pas pourquoi. Impossible de retrouver le rollout `v0.0.4-arm64` (thème rose/violet) sans aller voir le tag d'image de chaque ReplicaSet à la main.
 
 ![alt text](screenshots/k8s-rollout-history.png)
 
-Ça devient utile uniquement si on annote chaque déploiement, comme proposé dans le TP :
+Utile uniquement avec annotation :
 
 ```bash
 kubectl annotate deployment/frontend -n staging \
@@ -776,93 +734,68 @@ kubectl annotate deployment/frontend -n staging \
 ![alt text](screenshots/k8s-rollout-history-theme.png)
 
 
-Le `kubectl rollout undo` s'est exécuté sans souci : on retombe sur la révision précédente (thème noir/jaune) et l'historique remet à jour les numéros de révision.
+`kubectl rollout undo` ramène à la révision précédente (thème noir/jaune).
 
 ![alt text](screenshots/k8s-rollout-history-rollback.png)
 
 ### Questions rolling update
 
-**Question 1 — Pendant le rolling update, le nombre de pods disponibles a-t-il diminué ? Pourquoi ?**
+**Question 1 — Le nombre de pods disponibles a-t-il diminué ?**
 
-Non. La stratégie par défaut d'un Deployment est `RollingUpdate` avec `maxSurge: 25%` et `maxUnavailable: 25%`. Avec `replicas: 2`, ça arrondit à : on peut avoir **jusqu'à 3 pods en vol** (2 + 1 surge) et **au moins 1 pod toujours disponible** pendant la transition.
+Non. Default `RollingUpdate` avec `maxSurge: 25%` et `maxUnavailable: 25%`. À `replicas: 2`, jusqu'à 3 pods en vol et au moins 1 dispo.
 
-Concrètement, dans le Terminal A on a vu un troisième pod `frontend-*` apparaître en `Pending` → `ContainerCreating` → `Running 1/1` (nouveau hash, nouvelle image). Ce n'est qu'**après** que sa readiness probe ait passé que Kubernetes a marqué un ancien pod en `Terminating`. Du point de vue du Service, il y a toujours eu au moins 2 endpoints prêts — aucune coupure côté utilisateur.
+Un 3ᵉ pod `frontend-*` apparaît (nouveau hash) → `Pending` → `Running 1/1`. C'est seulement après readiness verte qu'un ancien passe en `Terminating`. Le Service garde toujours ≥2 endpoints prêts.
 
-C'est exactement ce que la readiness probe garantit : tant que le nouveau pod ne répond pas `200` sur `/`, il n'est pas inclus dans les endpoints, et l'ancien continue de servir.
+**Question 2 — Si le nouveau pod n'était jamais passé en 1/1 ?**
 
-**Question 2 — Que se serait-il passé si le nouveau pod n'était jamais passé en `1/1` ?**
+Rollout bloqué, prod intacte. Kube refuse de retirer l'ancien tant que le nouveau n'est pas prêt (`maxUnavailable`). Nouveau pod en `0/1 Running` en boucle, anciens replicas servent tout le trafic, `kubectl rollout status` attend.
 
-Le rollout se serait **bloqué proprement, sans casser la prod**. Kubernetes refuse de retirer l'ancien pod tant que le nouveau n'est pas prêt (c'est la garantie `maxUnavailable`). Donc :
+Au bout de `progressDeadlineSeconds` (600s par défaut) : `Progressing: False, reason: ProgressDeadlineExceeded`. Signal pour la CI/CD. Soit on diagnostique (logs, image cassée), soit `rollout undo`.
 
-- Le nouveau pod resterait en `0/1 Running`, en boucle de probe failed.
-- Aucun ancien pod ne serait terminé → les 2 anciens replicas continueraient à servir tout le trafic.
-- `kubectl rollout status deployment/frontend` afficherait `Waiting for deployment "frontend" rollout to finish: 1 of 2 updated replicas are available...` indéfiniment.
-- Au bout du `progressDeadlineSeconds` (600s par défaut), le Deployment passerait en `Progressing: False, reason: ProgressDeadlineExceeded` — visible avec `kubectl describe`. C'est un signal pour la CI/CD ou un opérateur humain.
+**Question 3 — Pourquoi annoter en équipe ?**
 
-À ce stade, soit on diagnostique (logs du nouveau pod, image cassée ?), soit on `kubectl rollout undo` pour annuler.
+Sans annotation, `rollout history` = liste de numéros opaques. En équipe :
+- Post-mortem : rollback vers quelle révision ?
+- Traçabilité : un déploiement n'est pas qu'un changement d'image (ticket, hotfix, contexte).
+- Onboarding : zéro info utile.
+- `rollout undo --to-revision=N` exige de savoir laquelle.
 
-**Question 3 — Pourquoi annoter les révisions est-il important en équipe ?**
+À automatiser depuis la CI : `kubernetes.io/change-cause="<sha> <pr-title> by <author>"`.
 
-Sans annotation, `rollout history` n'est qu'une liste de numéros opaques (`REVISION 1, 2, 3` avec `CHANGE-CAUSE: <none>`). En équipe ça pose plusieurs problèmes :
+**Question 4 — `kubectl rollout undo` suffit en prod ?**
 
-- **Post-mortem impossible à chaud** : "le rollout 14h32 a cassé la prod, on rollback vers laquelle ?" — sans CHANGE-CAUSE on doit chercher le tag d'image correspondant en fouillant `kubectl get rs -o yaml`.
-- **Pas de traçabilité humaine** : un déploiement n'est pas qu'un changement d'image, c'est aussi un contexte (ticket Jira, hotfix, feature flag activé). Sans annotation, ce contexte vit ailleurs (Slack, mémoire) et se perd.
-- **Onboarding** : un nouveau membre qui regarde l'historique d'un Deployment ne voit aucune information utile, alors qu'avec des `change-cause` propres il a un journal de bord.
-- **Rollback ciblé** : `kubectl rollout undo --to-revision=N` exige de savoir laquelle est la bonne. Sans annotation, c'est de la divination.
+Non, dépannage manuel. Limites :
+- `revisionHistoryLimit` 10 par défaut.
+- Couvre que le manifest du Deployment — une migration DB destructive ne se rollback pas.
+- Présume que la version N-1 marche encore (dépendance externe disparue ?).
+- Pas d'audit trail.
+- Granularité = tout le Deployment, pas une feature.
 
-L'idéal en équipe est d'automatiser l'annotation depuis la CI : à chaque `kubectl apply`, le pipeline ajoute `kubernetes.io/change-cause="<commit-sha> <pr-title> by <author>"`.
-
-**Question 4 — `kubectl rollout undo` est-il suffisant comme stratégie de rollback en production ?**
-
-Non, ça reste un dépannage à la main. Limites principales :
-
-- **Limité à l'historique mémorisé** : `revisionHistoryLimit` (10 par défaut) — au-delà, les anciens ReplicaSets sont supprimés. Impossible de rollback vers une version trop ancienne.
-- **Ne couvre que le manifest du Deployment** : si la nouvelle version a fait une migration de schéma DB destructive, `rollout undo` ramène l'ancienne image mais pas le schéma. L'app cassera autrement (colonne supprimée, type changé, etc.). Idem pour ConfigMap/Secret modifiés en parallèle.
-- **Pas de test automatisé du rollback** : on présume que la version N-1 fonctionne encore, mais elle peut avoir une dépendance qui n'existe plus (API tierce dépréciée, message Kafka avec nouveau format, etc.).
-- **Action manuelle, pas d'audit trail** : qui a rollback, à quelle heure, pourquoi ? Pas de trace structurée.
-- **Granularité limitée** : on rollback **tout le Deployment**, pas une feature précise. Si un seul endpoint bug, on annule aussi les corrections de bugs livrées dans la même release.
-
-En production sérieuse, `rollout undo` est plutôt le dernier recours d'un humain en pleine incident. Les pratiques préférables :
-
-- **Feature flags** (LaunchDarkly, Unleash) pour désactiver une fonctionnalité sans toucher au déploiement.
-- **Canary / Blue-Green** (Argo Rollouts, Flagger) pour valider la nouvelle version sur un % du trafic avant de basculer, avec rollback automatique sur métriques (taux d'erreur, latence).
-- **GitOps** (ArgoCD, Flux) où l'état désiré est dans Git : le rollback c'est `git revert` du commit puis re-sync — auditable, reproductible, et visible par toute l'équipe.
-- **Migrations DB compatibles ascendant/descendant** (expand-then-contract) pour qu'un rollback applicatif n'invalide pas le schéma.
+En prod : feature flags pour désactiver sans redéploiement, canary / blue-green (Argo Rollouts, Flagger) avec rollback auto sur métriques, GitOps (ArgoCD, Flux) où le rollback = `git revert` + sync, migrations DB compatibles ascendant/descendant.
 
 ---
 
 ## Réflexion théorique — duplication dans les manifests
 
-**Question — Identifier au moins 3 valeurs répétées dans plusieurs fichiers, et impact d'un changement pour un déploiement en production**
+**Identifier au moins 3 valeurs répétées et l'impact en prod**
 
-En relisant les ~20 manifests de `k8s/base/`, plusieurs valeurs reviennent systématiquement :
+Dans les ~20 manifests de `k8s/base/` :
 
-1. **`namespace: staging`** — présent dans **tous** les manifests (Deployment, Service, ConfigMap, Secret, StatefulSet, Ingress) — environ 20 occurrences. Pour passer en `production`, il faudrait changer chaque fichier un par un.
-2. **Le tag d'image `v0.0.4-arm64`** — répété dans chaque `deployment.yaml` (5 services applicatifs). Une bump de version Docker oblige à modifier 5 fichiers et à éviter les oublis (un service oublié = version désynchronisée en prod).
-3. **Les URLs internes des services** — `http://user-service:3001`, `http://task-service:3002`, `http://notification-service:3003`, `http://otel-collector:4318` apparaissent dans `api-gateway-cm.yaml`, `task-service-cm.yaml`, `notification-service-cm.yaml`, etc. Si un port change ou si un service est renommé, c'est multi-fichier.
-4. **Les labels `app: <service>`** — dupliqués 3 fois par service (selector du Deployment + labels du template + selector du Service). Une faute de frappe et le Service ne route plus rien.
-5. **Le nom `postgres-secret`** — référencé depuis `user-service`, `task-service`, `api-gateway` pour `DATABASE_URL` et `JWT_SECRET`.
-6. **Les blocs `resources` (requests/limits) et `probes`** — quasi identiques entre `user-service`, `task-service`, `api-gateway` (image Node, port 3001/3002/3000).
+1. **`namespace: staging`** dans tous les fichiers (~20 occurrences). Pour passer en prod, faut tout modifier un par un.
+2. **Le tag `v0.0.4-arm64`** dans chaque `deployment.yaml` (5 services). Bump de version = 5 fichiers à modifier sans oubli.
+3. **URLs internes** (`http://user-service:3001`, `http://task-service:3002`...) dans plusieurs ConfigMaps. Changement de port = multi-fichier.
+4. **Labels `app: <service>`** dupliqués 3× par service (selector du Deployment + labels du template + selector du Service). Faute de frappe = Service qui ne route plus.
 
-### Impact concret pour un déploiement en production
+### Impact en prod
 
-Imaginons qu'on veuille créer un environnement `production` à côté de `staging`. Il faudrait :
+Pour créer un environnement `production` à côté de staging : dupliquer en `k8s/production/`, find/replace `staging` → `production` dans chaque fichier (risque d'oubli silencieux), changer le tag dans chaque Deployment, adapter les ressources, changer le `host` de l'Ingress + TLS, gérer les Secrets séparément.
 
-- **Dupliquer l'arborescence `k8s/base/` en `k8s/production/`** — soit ~20 fichiers copiés-collés.
-- **Faire un find/replace `staging` → `production`** dans chaque fichier. Risque : oublier un namespace dans un manifest, et ce manifest s'applique au mauvais cluster (ou pire, ne s'applique nulle part et passe inaperçu).
-- **Changer le tag d'image dans chaque Deployment** — typiquement la prod ne tourne pas la même version que la staging (staging = `v0.0.5`, prod = `v0.0.4` stable).
-- **Adapter les ressources** (la prod a probablement plus de CPU/mémoire, plus de replicas, des `resources.limits` plus généreux).
-- **Adapter le `host` de l'Ingress** (`localhost` en dev, `taskflow.exemple.com` en prod), ajouter du TLS, etc.
-- **Gérer les secrets différemment** — pas le même `JWT_SECRET` ni la même URL Postgres entre staging et prod, donc les `Secret` doivent être par environnement.
+À chaque modif structurelle (port, image, namespace) → risque de désynchro. Changer le port du `task-service` 3002 → 8080 = chercher `3002` partout (configmap task, service, configmap api-gateway, prometheus.yml...) à la main.
 
-À chaque modification d'une valeur "structurelle" (port d'un service, nom d'image, namespace), c'est un risque d'oubli ou de désynchronisation entre les environnements. Le test "j'ai changé le port du `task-service` de 3002 à 8080" implique de chercher dans **tous** les fichiers où `3002` apparaît (configmap du task-service, service du task-service, configmap de l'api-gateway, prometheus.yml, etc.) et de les modifier à la main.
+### Pourquoi ça motive Helm / Kustomize
 
-### Pourquoi ça motive Helm (ou Kustomize)
+- **Kustomize** : on garde `k8s/base/` et on applique des overlays par environnement. Du YAML pur, sans templating.
+- **Helm** : chart paramétré par un `values.yaml` par environnement. Namespace, tag, replicas → `{{ .Values.* }}`. Packaging réutilisable, versioning, hooks de migration.
+- **GitOps + ArgoCD** : combine Kustomize/Helm avec un sync Git → cluster.
 
-C'est exactement ce que la dernière phrase de l'objectif du TP annonçait : *"ressentir la répétition qui motive Helm"*. Les outils existants pour résoudre ça :
-
-- **Kustomize** (intégré à `kubectl`) : on garde les manifests `k8s/base/` tels quels, et on crée des **overlays** (`k8s/overlays/staging/`, `k8s/overlays/production/`) qui ne contiennent que les **patches** par environnement (namespace, replicas, image, ressources). Avantage : pas de templating, du YAML pur.
-- **Helm** : un chart paramétré par un `values.yaml` par environnement (`values-staging.yaml`, `values-production.yaml`). Le namespace, le tag d'image, les replicas, etc. deviennent des `{{ .Values.namespace }}`. Avantage : packaging réutilisable, versioning de releases, hooks de migration.
-- **GitOps + ArgoCD** : on combine généralement Kustomize ou Helm avec un outil de sync continu qui applique automatiquement l'état désiré du repo Git vers le cluster cible.
-
-Concrètement, après avoir écrit ces 20 fichiers à la main, on comprend pourquoi aucune équipe sérieuse ne maintient des manifests Kubernetes "raw" en production multi-environnement.
+Après avoir écrit ces 20 fichiers à la main, on comprend pourquoi personne ne maintient des manifests raw en prod multi-env.
