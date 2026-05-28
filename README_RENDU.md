@@ -1239,3 +1239,50 @@ Le sidecar Grafana (activé dans `values.monitoring.yaml` : `grafana.sidecar.das
 ![alt text](screenshots/grafana-dashboard-configmap.png)
 
 À noter : ce ConfigMap est appliqué via `kubectl` et non par Helm — la ressource vit donc **hors du contrôle de Helm**. C'est volontaire ici : le JSON contient `"{{ job }}"` (variable de légende Grafana), qui serait interprété comme du template Go et casserait un `helm install`. L'étape suivante (`.Files.Glob`) corrige ce point en chargeant les JSON depuis un dossier.
+
+### Réflexion théorique — Limites du ConfigMap inline
+
+**Question 1 — Pourquoi coller le JSON inline dans `data:` avec `|` est problématique**
+
+Trois raisons :
+
+- **Collision avec le moteur de template Helm.** Un JSON de dashboard Grafana contient des `{{ … }}` (variables de légende type `{{ job }}`, `{{ instance }}`). Dès que le ConfigMap est rendu par Helm, ces `{{ }}` sont interprétés comme du template Go → `function "job" not defined` (erreur rencontrée en vrai en passant le chart en local). Inliner imposerait d'échapper chaque `{{ }}` à la main — intenable.
+- **Lisibilité / maintenabilité.** Un dashboard fait des centaines de lignes ; collé sous `data:` avec `|`, il vit indenté dans du YAML, sensible à l'indentation, impossible à éditer dans l'éditeur JSON de Grafana ou à valider/diff proprement.
+- **Plusieurs dashboards.** Chaque dashboard = une clé `data:` + un nouveau bloc collé. En ajouter un = rééditer le template à la main. Aucune réutilisation, et l'artefact Grafana (JSON) se mélange à la logique Helm.
+
+**Question 2 — Fonction `.Files` pour charger tous les `*.json` d'un dossier**
+
+`.Files.Glob` : elle retourne tous les fichiers du chart matchant un motif (`dashboards/*.json`) en une seule déclaration, sans lister chaque fichier. Couplée à la méthode `.AsConfig`, elle produit directement les entrées `data:` d'un ConfigMap. Point clé : `.Files.Glob` / `.Files.Get` lisent le contenu comme **donnée brute**, jamais ré-évaluée par le moteur de template → les `{{ }}` du JSON restent littéraux (plus besoin d'échapper).
+
+**Question 3 — Implémentation du ConfigMap**
+
+Dashboards placés sous `helm/monitoring/dashboards/*.json`. Template `helm/monitoring/templates/dashboard-configmap.yaml` :
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: taskflow-dashboards
+  namespace: {{ .Release.Namespace }}
+  labels:
+    grafana_dashboard: "1"   # repéré par le sidecar Grafana
+data:
+{{ (.Files.Glob "dashboards/*.json").AsConfig | indent 2 }}
+```
+
+`(.Files.Glob "dashboards/*.json")` récupère tous les JSON (chemin relatif à la racine du chart), `.AsConfig` les transforme en map `nom-de-fichier: contenu` correctement indentée sous `data:`. Ajouter un dashboard = déposer un `.json` dans le dossier, rien à modifier dans le template.
+
+Variante avec `range` si on veut contrôler chaque clé :
+
+```yaml
+data:
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+  {{ base $path }}: |-
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}
+```
+
+Cette approche rend aussi inutile l'échappement `{{ "{{ job }}" }}` du ConfigMap inline : le JSON étant lu comme donnée, ses `{{ }}` ne passent plus par le moteur de template.
+
+Liste des datasources :
+![alt text](screenshots/helm-grafana-datasources.png)

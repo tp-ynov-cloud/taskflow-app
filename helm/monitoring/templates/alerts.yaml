@@ -1,13 +1,23 @@
-apiVersion: monitoring.coreos.com/v1
-kind: PrometheusRule
-metadata:
-  name: taskflow-alerts
-  namespace: monitoring
-  labels:
-    release: monitoring
-spec:
-  groups:
-    - name: taskflow
-      rules:
-        - alert: ServiceDown
-          # [...]
+# Règle d'alerte à compléter à l'Étape 4 (HighP95Latency).
+# Parquée en commentaire pour l'instant : un PrometheusRule avec un `expr`
+# manquant est rejeté par l'API ("spec.groups[0].rules[0].expr: Required value").
+# À l'Étape 4, décommenter et compléter les champs (expr / for / labels / annotations).
+#
+# apiVersion: monitoring.coreos.com/v1
+# kind: PrometheusRule
+# metadata:
+#   name: taskflow-alerts
+#   namespace: monitoring
+#   labels:
+#     release: monitoring
+# spec:
+#   groups:
+#     - name: taskflow
+#       rules:
+#         - alert: HighP95Latency
+#           expr: # <PromQL : P95 de http_request_duration_ms du task-service > 500ms>
+#           for: # <durée d'attente avant firing>
+#           labels:
+#             severity: warning
+#           annotations:
+#             summary: # <message lisible>
