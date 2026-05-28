@@ -1,23 +1,21 @@
-# Règle d'alerte à compléter à l'Étape 4 (HighP95Latency).
-# Parquée en commentaire pour l'instant : un PrometheusRule avec un `expr`
-# manquant est rejeté par l'API ("spec.groups[0].rules[0].expr: Required value").
-# À l'Étape 4, décommenter et compléter les champs (expr / for / labels / annotations).
-#
-# apiVersion: monitoring.coreos.com/v1
-# kind: PrometheusRule
-# metadata:
-#   name: taskflow-alerts
-#   namespace: monitoring
-#   labels:
-#     release: monitoring
-# spec:
-#   groups:
-#     - name: taskflow
-#       rules:
-#         - alert: HighP95Latency
-#           expr: # <PromQL : P95 de http_request_duration_ms du task-service > 500ms>
-#           for: # <durée d'attente avant firing>
-#           labels:
-#             severity: warning
-#           annotations:
-#             summary: # <message lisible>
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: taskflow-alerts
+  namespace: {{ .Release.Namespace }}
+  labels:
+    release: monitoring          # repéré par le ruleSelector de Prometheus
+spec:
+  groups:
+    - name: taskflow
+      rules:
+        - alert: HighP95Latency
+          # P95 de la durée des requêtes du task-service sur 1 min, buckets agrégés par (job, le)
+          # avant le quantile ; /metrics exclu (endpoint de scrape, pas du trafic utilisateur).
+          expr: 'histogram_quantile(0.95, sum by (job, le) (rate(http_request_duration_ms_bucket{job="task-service", route!="/metrics"}[1m]))) > 500'
+          for: 30s
+          labels:
+            severity: warning
+          annotations:
+            summary: "Latence P95 élevée sur task-service"
+            description: "Le P95 de http_request_duration_ms du task-service dépasse 500ms (fenêtre 1m) depuis plus de 30s."

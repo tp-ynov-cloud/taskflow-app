@@ -1290,3 +1290,30 @@ Liste des datasources :
 ## Étape 3 — Connecter TaskFlow à Prometheus
 
 ![alt text](screenshots/prometheus-targets.png)
+
+## Étape 4 — Configurer une alerte
+
+Règle `HighP95Latency` complétée dans `helm/monitoring/templates/alerts.yaml` :
+
+```yaml
+- alert: HighP95Latency
+  expr: 'histogram_quantile(0.95, sum by (job, le) (rate(http_request_duration_ms_bucket{job="task-service", route!="/metrics"}[1m]))) > 500'
+  for: 30s
+  labels:
+    severity: warning
+  annotations:
+    summary: "Latence P95 élevée sur task-service"
+    description: "Le P95 de http_request_duration_ms du task-service dépasse 500ms (fenêtre 1m) depuis plus de 30s."
+```
+
+Construction de l'expression (reprise du dashboard Grafana, adaptée) :
+
+- `http_request_duration_ms_bucket` : l'histogramme prom-client expose ses buckets avec le suffixe `_bucket` (+ label `le`) — c'est ce que consomme `histogram_quantile()`.
+- `rate(...[1m])` : taux par bucket sur la fenêtre glissante de 1 min (le TP impose 1m ; le dashboard utilise 5m pour le lissage visuel).
+- `sum by (job, le) (...)` : **agrégation des buckets avant le quantile**. `histogram_quantile()` opère série par série ; sans agréger les labels parasites (`route`, `method`, `status`), on calculerait un P95 par série au lieu du P95 global → faux. On garde `job` pour conserver l'étiquette sur l'alerte.
+- `{job="task-service", route!="/metrics"}` : cible le task-service et exclut l'endpoint de scrape `/metrics` (pas du trafic utilisateur).
+- `> 500` : seuil de 500ms. `for: 30s` : la condition doit tenir 30s en continu avant de passer `firing` (filtre les pics ponctuels).
+
+Le label `release: monitoring` sur le `PrometheusRule` le rend visible au `ruleSelector` de Prometheus (même mécanisme que les ServiceMonitors). La règle apparaît en `OK` sur http://localhost:9090/rules et passera en `firing` sous charge k6.
+
+![alt text](screenshots/prometheus-rules.png)
