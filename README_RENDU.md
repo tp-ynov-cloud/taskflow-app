@@ -1402,4 +1402,42 @@ Conclusion : le HPA n'a de sens que sur un cluster cloud à nœuds élastiques. 
 
 ![alt text](screenshots/k8s-hpa-test2.png)
 
+## Étape 7 — Haute disponibilité et résilience
 
+### Manipulation
+
+`kubectl get deployments -n staging` → tous les services ont ≥ 2 replicas (api-gateway, user-service, notification-service, frontend à 2 ; task-service à 5 après le scale-up HPA).
+
+Simulation de panne **sous charge** : suppression d'un pod `api-gateway` pendant qu'une charge continue tape `api-gateway:/health` (en interne, comptage OK/échec).
+
+```
+api-gateway-...-2rdhk   Terminating   ← pod supprimé
+api-gateway-...-nbqs5   Running       ← survivant (sert le trafic)
+api-gateway-...-qkhqv   Pending       ← remplaçant recréé par le ReplicaSet (age 0s)
+```
+
+**Résultat : 7052 requêtes OK, 0 échec** pendant la bascule, puis retour à `2/2`. La readiness retire le pod `Terminating` des `Endpoints`, le Service route vers le survivant → aucune interruption.
+
+### Réflexion théorique — Élasticité vs haute disponibilité
+
+**Q1 — Élasticité vs HA ? Le HPA contribue-t-il aux deux ?**
+- **Élasticité** = adapter le nombre d'instances à la **charge** (scale up/down selon la demande) → c'est le HPA.
+- **Haute disponibilité** = tolérer les **pannes** (un pod/nœud tombe, le service reste up) → repose sur plusieurs replicas + readiness + le ReplicaSet, et idéalement la répartition multi-nœuds.
+Le HPA sert surtout l'élasticité. Il **contribue indirectement** à la HA (`minReplicas ≥ 2` impose un plancher de redondance) mais ne suffit pas — et avec `minReplicas: 1` il peut même supprimer toute redondance.
+
+**Q2 — `replicaCount: 2` vs `1` si un pod crashe ?**
+- **2** : l'autre replica sert pendant que le ReplicaSet recrée le pod → **zéro interruption** (démontré : 0 échec sur 7052 requêtes).
+- **1** : aucun secours → le service est **indisponible** le temps de recréer le pod (démarrage + readiness, plusieurs secondes) → erreurs côté client.
+
+**Q3 — Quel composant maintient le nombre de replicas (réconciliation) ?**
+Le **ReplicaSet** (créé/piloté par le Deployment controller, dans le kube-controller-manager). Il compare en boucle l'état désiré (`replicas`) à l'état réel et recrée les pods manquants — on l'a vu recréer le pod instantanément.
+
+**Q4 — Le staging garantit-il la HA ? Conditions en prod ?**
+Partiellement : redondance (≥ 2 replicas) + readiness + self-healing → résiste à la perte d'**un pod**. Mais kind = **un seul nœud physique** : si le nœud tombe, tout tombe. En prod il faut :
+- plusieurs **nœuds** répartis en **zones de disponibilité** (multi-AZ) ;
+- **`podAntiAffinity`** pour ne pas concentrer les replicas d'un service sur un même nœud ;
+- **PodDisruptionBudget** (garder un minimum de pods prêts pendant maintenances/évictions) ;
+- HA des composants **stateful** : postgres en réplication + failover, redis en Sentinel/Cluster ;
+- **Cluster Autoscaler** pour remplacer un nœud perdu.
+
+> Nuance : la commande du TP `kubectl delete pod -l app=api-gateway` supprime **tous** les pods du label (les 2) → bref outage le temps de la recréation. Pour démontrer la HA (survie à la perte d'**un** pod), on en supprime un seul — d'où le 0 échec.
