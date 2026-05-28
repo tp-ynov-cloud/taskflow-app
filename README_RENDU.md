@@ -1286,3 +1286,7 @@ Cette approche rend aussi inutile l'échappement `{{ "{{ job }}" }}` du ConfigMa
 
 Liste des datasources :
 ![alt text](screenshots/helm-grafana-datasources.png)
+
+## Étape 3 — Connecter TaskFlow à Prometheus
+
+![alt text](screenshots/prometheus-targets.png)

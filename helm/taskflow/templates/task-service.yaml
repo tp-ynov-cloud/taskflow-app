@@ -54,9 +54,12 @@ kind: Service
 metadata:
   name: task-service
   namespace: {{ .Release.Namespace }}
+  labels:
+    app: task-service
 spec:
   selector:
     app: task-service
   ports:
-    - port: 3002
+    - name: http
+      port: 3002
       targetPort: 3002

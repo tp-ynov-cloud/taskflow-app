@@ -1,0 +1,21 @@
+{{- /* Un ServiceMonitor par service backend, générés via range pour éviter 4 fichiers quasi-identiques. */}}
+{{- range $svc := list "api-gateway" "user-service" "task-service" "notification-service" }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $svc }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    release: monitoring          # repéré par serviceMonitorSelector de Prometheus
+spec:
+  namespaceSelector:
+    matchNames:
+      - staging                  # les Services TaskFlow vivent dans staging
+  selector:
+    matchLabels:
+      app: {{ $svc }}            # cible le Service portant ce label
+  endpoints:
+    - port: http                 # port nommé sur le Service
+      path: /metrics
+{{- end }}

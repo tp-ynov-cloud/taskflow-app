@@ -1,24 +1,32 @@
-grafana:
-  sidecar:
-    dashboards:
-      enabled: true       # activate automatic loading of dashboards via ConfigMap
-      label: grafana_dashboard
-  ingress:
-    enabled: true
-    ingressClassName: nginx
-    path: /grafana
-    pathType: Prefix
-    hosts: ["localhost"]
-  grafana.ini:
-    server:
-      root_url: "http://localhost/grafana"
-      serve_from_sub_path: true
+# Valeurs destinées au sous-chart kube-prometheus-stack → imbriquées sous sa clé.
+# (alertmanagerConfig, lui, reste à la racine — il est consommé par nos templates maison.)
+kube-prometheus-stack:
+  grafana:
+    sidecar:
+      dashboards:
+        enabled: true       # chargement auto des dashboards via ConfigMap labellisé
+        label: grafana_dashboard
+    ingress:
+      enabled: true
+      ingressClassName: nginx
+      path: /grafana
+      pathType: Prefix
+      hosts: ["localhost"]
+    grafana.ini:
+      server:
+        root_url: "http://localhost/grafana"
+        serve_from_sub_path: true
 
-prometheus:
-  prometheusSpec:
-    retention: 7d
-    resources:
-      requests:
-        memory: "512Mi"
-      limits:
-        memory: "1Gi"
+  prometheus:
+    prometheusSpec:
+      retention: 7d
+      resources:
+        requests:
+          memory: "512Mi"
+        limits:
+          memory: "1Gi"
+      # Découverte des ServiceMonitors hors du namespace de Prometheus :
+      serviceMonitorNamespaceSelector: {}        # tous les namespaces
+      serviceMonitorSelector:
+        matchLabels:
+          release: monitoring

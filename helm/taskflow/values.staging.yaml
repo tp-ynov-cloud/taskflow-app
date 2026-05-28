@@ -1,0 +1,8 @@
+# Environnement staging — surcharge de values.yaml.
+# values.yaml porte déjà des défauts adaptés au staging (2 replicas, ressources modestes) ;
+# ce fichier rend l'environnement explicite et sert de point d'override (ex. HPA à l'Étape 6).
+# Déploiement :
+#   helm upgrade --install taskflow ./helm/taskflow -n staging -f helm/taskflow/values.staging.yaml
+image:
+  tag: v1.0.1
+  pullPolicy: IfNotPresent
