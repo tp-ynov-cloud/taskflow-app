@@ -4,7 +4,9 @@ metadata:
   name: task-service
   namespace: {{ .Release.Namespace }}
 spec:
-  replicas: {{ .Values.taskService.replicaCount }}
+  {{- if not .Values.taskService.hpa.enabled }}
+  replicas: {{ .Values.taskService.replicaCount }}   # ignoré quand le HPA pilote spec.replicas
+  {{- end }}
   selector:
     matchLabels:
       app: task-service
@@ -63,3 +65,25 @@ spec:
     - name: http
       port: 3002
       targetPort: 3002
+{{- if .Values.taskService.hpa.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: task-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: task-service
+  minReplicas: {{ .Values.taskService.hpa.minReplicas }}
+  maxReplicas: {{ .Values.taskService.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.taskService.hpa.targetCPU }}
+{{- end }}

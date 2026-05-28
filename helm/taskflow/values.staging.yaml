@@ -6,3 +6,12 @@
 image:
   tag: v1.0.1
   pullPolicy: IfNotPresent
+
+# HPA activé en staging pour l'observer (cf. Étape 6). Sur kind il n'apporte rien
+# de réel — les nœuds n'ont pas d'élasticité ; à désactiver après observation.
+taskService:
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPU: 70

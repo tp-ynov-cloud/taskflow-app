@@ -1342,3 +1342,64 @@ kube-prometheus-stack étant une dépendance, c'est le **Prometheus Operator** q
 **Test** : `k6 run scripts/load-test-realistic.js`, puis port-forward Alertmanager (`9093`) → l'alerte `HighP95Latency` apparaît et le mail part (vérifié dans les logs transactionnels Brevo).
 
 ![alt text](screenshots/alertmanager-firing2.png)
+
+## Étape 6 — Auto-scaling avec le HPA
+
+### Implémentation
+
+Dans `helm/taskflow/templates/task-service.yaml`, deux contraintes :
+
+1. **`replicas` conditionnel** — quand le HPA est actif, il devient propriétaire de `spec.replicas`. Si Helm le fixe aussi, conflit de field manager. D'où :
+   ```yaml
+   {{- if not .Values.taskService.hpa.enabled }}
+   replicas: {{ .Values.taskService.replicaCount }}
+   {{- end }}
+   ```
+2. **HPA généré seulement si activé** — `{{- if .Values.taskService.hpa.enabled }}` autour d'un `HorizontalPodAutoscaler` `autoscaling/v2` ciblant le Deployment, sur CPU `averageUtilization`.
+
+Values : `taskService.hpa.enabled: false` par défaut (`values.yaml`), activé en staging (max 5) et production (max 10).
+
+**Prérequis Metrics Server** — le HPA lit le CPU des pods via le Metrics Server. Sur kind, il faut `--kubelet-insecure-tls` (les kubelets de kind exposent un certificat auto-signé que le Metrics Server ne peut pas vérifier) :
+```bash
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+kubectl patch deployment metrics-server -n kube-system --type='json' \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+```
+Puis `helm upgrade ... -f values.staging.yaml` et `kubectl get hpa -n staging`.
+
+### Réflexion théorique — Observer et comprendre le scaling
+
+**Q1 — Quels services montrent latence/erreurs sous charge ? Cohérent ?**
+Sous le test réaliste, l'**api-gateway** et le **user-service** (login = bcrypt, CPU) saturent en premier (p95 end-to-end ~13s) ; le task-service reste bas (~55ms) car peu de trafic l'atteint. En charge **directe**, le task-service monte à ~1950ms. Cohérent avec l'archi : login CPU-intensif, gateway = point d'entrée unique qui proxifie tout, et le task-service ne devient lent que sous charge directe (POST = `INSERT` + `COUNT GROUP BY` + publish Redis).
+
+**Q2 — Quels services scaler horizontalement, lesquels non ?**
+Scalables (stateless) : `api-gateway`, `user-service`, `task-service`, `frontend`. À éviter : `postgres` (StatefulSet, primary unique — il faut de la réplication, et le `max_connections` devient le vrai plafond → PgBouncer), `redis` (pub/sub broadcast — scaler casse la sémantique), `notification-service` (`replicas: 1` — chaque réplica recevrait chaque message → notifs dupliquées). Scaler le task-service n'aide que jusqu'à ce que postgres sature.
+
+**Q3 — Le HPA a-t-il amélioré les résultats ?**
+Sur kind, non — voire l'inverse. Les nœuds kind sont des conteneurs partageant le CPU de la machine ; ajouter des pods task-service n'ajoute pas de capacité réelle, ça augmente la contention. Et sous le test réaliste, le goulot n'est pas le task-service (c'est login/gateway) → le scaler ne change rien à la latence observée. Surprenant mais logique : le HPA suppose des nœuds élastiques, que kind n'a pas.
+
+**Q4 — Si le nœud n'a plus de ressources ? Cluster Autoscaler / Karpenter ?**
+Les nouveaux pods restent `Pending` (unschedulable). Le **Cluster Autoscaler** détecte les pods Pending et provisionne de nouveaux **nœuds** (cloud) ; **Karpenter** fait pareil en plus rapide/flexible (nœuds right-sized just-in-time). Sur kind : impossible — les nœuds sont des conteneurs Docker fixes, pas de provider cloud, donc aucun des deux ne peut ajouter de nœud.
+
+### Réflexion théorique — Choisir la bonne métrique de scaling
+
+**Q1 — Le CPU est-il la bonne métrique pour un service HTTP ?**
+Pas toujours. Quand le goulot est I/O (attente DB, pool de connexions saturé, appel externe lent), la latence explose mais le CPU reste bas (le process est bloqué en attente, pas en calcul). Notre POST task-service attend postgres/Redis : sous contention la latence monte sans saturer le CPU → un HPA CPU ne réagirait pas alors que les users subissent >500ms.
+
+**Q2 — Quelle autre métrique combiner, quel seuil ?**
+Le **P95 de `http_request_duration_ms`** (la métrique de l'alerte), seuil ~**300ms** — sous les 500ms de l'alerte, pour scaler **avant** la violation du SLO. `autoscaling/v2` scale dès qu'**une** métrique dépasse son seuil, donc CPU 70% **ou** P95 > 300ms. Le dashboard confirme que le P95 est le signal pertinent (monté à 1950ms là où le CPU peut tromper). Alternative : RPS par pod.
+
+**Q3 — Composant manquant ?**
+Pour le HPA CPU : le **Metrics Server** (installé). Pour le HPA sur métrique Prometheus (Q2) : le **prometheus-adapter**, qui expose les métriques Prometheus via l'API `custom.metrics.k8s.io` lue par le HPA — sans lui, le HPA ne peut pas lire `http_request_duration_ms`. Et sur kind, même en scalant, pas d'élasticité de nœuds → plafond = la machine.
+
+### Cloisonner à la production
+
+Conclusion : le HPA n'a de sens que sur un cluster cloud à nœuds élastiques. Final : **désactivé en staging** (`hpa.enabled: false`), **activé en production** (`minReplicas: 2`, `maxReplicas: 10`, `targetCPU: 70`).
+
+![alt text](screenshots/k8s-hpa.png)
+
+![alt text](screenshots/k8s-hpa-test.png)
+
+![alt text](screenshots/k8s-hpa-test2.png)
+
+

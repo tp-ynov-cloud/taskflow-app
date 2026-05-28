@@ -27,6 +27,8 @@ userService:
 
 taskService:
   replicaCount: 2
+  hpa:
+    enabled: false
   resources:
     requests:
       memory: "128Mi"
