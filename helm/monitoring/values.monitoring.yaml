@@ -30,3 +30,9 @@ kube-prometheus-stack:
       serviceMonitorSelector:
         matchLabels:
           release: monitoring
+
+  alertmanager:
+    alertmanagerSpec:
+      # Utilise notre Secret (généré par templates/alertmanager-config.yaml)
+      # au lieu de la config Alertmanager par défaut générée par l'opérateur.
+      configSecret: taskflow-alertmanager-config

@@ -24,8 +24,8 @@ export const options = {
 };
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:3000';
-const EMAIL = __ENV.EMAIL || '';
-const PASSWORD = __ENV.PASSWORD || '';
+const EMAIL = __ENV.EMAIL || 'loadtest@taskflow.dev';
+const PASSWORD = __ENV.PASSWORD || 'loadtest123';
 
 export default function () {
   const headers = { 'Content-Type': 'application/json' };

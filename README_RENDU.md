@@ -1317,3 +1317,28 @@ Construction de l'expression (reprise du dashboard Grafana, adaptée) :
 Le label `release: monitoring` sur le `PrometheusRule` le rend visible au `ruleSelector` de Prometheus (même mécanisme que les ServiceMonitors). La règle apparaît en `OK` sur http://localhost:9090/rules et passera en `firing` sous charge k6.
 
 ![alt text](screenshots/prometheus-rules.png)
+
+## Étape 5 — Notifier via Alertmanager
+
+![alt text](screenshots/alertmanager-firing.png)
+
+Câblage : `kube-prometheus-stack.alertmanager.alertmanagerSpec.configSecret: taskflow-alertmanager-config` dans `values.monitoring.yaml` → l'opérateur utilise **notre** Secret (`templates/alertmanager-config.yaml`) comme config Alertmanager. Les credentials SMTP Brevo vivent dans `values.monitoring.secret.yaml` (gitignored) et sont injectés via `.Values.alertmanagerConfig.smtp`.
+
+**Pourquoi ne pas passer la config via `alertmanager.config` dans les values ?**
+
+kube-prometheus-stack étant une dépendance, c'est le **Prometheus Operator** qui gère la config d'Alertmanager (dans un Secret qu'il génère). Passer `alertmanager.config` dans les values ne met pas ce Secret à jour de façon fiable — l'opérateur le régénère avec sa config par défaut et écrase la nôtre. La voie propre : fournir **notre propre Secret** et le désigner par `configSecret`, que l'opérateur consomme tel quel.
+
+**Les timings (et pourquoi ils comptent)**
+
+| Paramètre | Où | Rôle |
+|---|---|---|
+| `for: 30s` | `PrometheusRule` | la condition doit tenir 30s avant de passer `firing` |
+| `group_wait: 5s` | route Alertmanager | délai avant la 1re notif d'un nouveau groupe |
+| `group_interval: 5m` | route Alertmanager | délai mini entre deux notifs si le groupe évolue |
+| `repeat_interval: 1h` | route Alertmanager | ré-émission d'une alerte toujours active |
+
+`for + group_wait` ≈ 35s entre le début du pic et le 1er mail. Si ce délai dépasse la durée du pic, on ne reçoit que le `resolved` sans jamais le `fired` — d'où le `group_wait` court (5s, vs 30s fourni) pour fiabiliser la réception pendant le test k6.
+
+**Test** : `k6 run scripts/load-test-realistic.js`, puis port-forward Alertmanager (`9093`) → l'alerte `HighP95Latency` apparaît et le mail part (vérifié dans les logs transactionnels Brevo).
+
+![alt text](screenshots/alertmanager-firing2.png)
