@@ -3,9 +3,15 @@ grafana:
     dashboards:
       enabled: true       # activate automatic loading of dashboards via ConfigMap
       label: grafana_dashboard
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    path: /grafana
+    pathType: Prefix
+    hosts: ["localhost"]
   grafana.ini:
     server:
-      root_url: "http://localhost:3100"
+      root_url: "http://localhost/grafana"
       serve_from_sub_path: true
 
 prometheus:

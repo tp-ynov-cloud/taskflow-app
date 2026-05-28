@@ -1157,3 +1157,85 @@ helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
 ```
 
 `--rollback-on-failure` activant déjà `--wait=watcher`, la réussite n'est déclarée qu'une fois tous les pods prêts — sinon rollback complet de la release.
+
+### Installer — nombre de fichiers
+
+**Question — Combien de fichiers pour installer la stack complète ? Comparaison avec la partie 1**
+
+**Zéro.** L'installation tient en une commande, sans écrire le moindre fichier (`--set grafana.adminPassword=admin` suffit pour la conf de base) :
+
+Le chart fournit et câble tout seul Prometheus, Grafana, Alertmanager, kube-state-metrics, node-exporter, le Prometheus Operator + ses CRDs, plus des dizaines de dashboards et de règles d'alerte par défaut.
+
+En **partie 1**, monter la stack d'observabilité a demandé **8 fichiers de config écrits à la main** :
+
+- `infra/prometheus/prometheus.yml` (cibles de scrape listées une par une)
+- `infra/tempo/tempo.yml`, `infra/otel/config.yml`
+- `infra/loki/loki-config.yml`, `infra/promtail/promtail-config.yml`
+- `infra/grafana/provisioning/datasources/datasources.yml` + `.../dashboard/dashboard.yml`
+- `docker-compose.infra.yml` (orchestration + ordre de démarrage)
+
+Différence de fond : en partie 1 **on est l'intégrateur** — chaque URL de datasource, chaque cible de scrape, chaque ordre de démarrage est câblé à la main. En 4B on **consomme un package maintenu** : 0 fichier livre une stack plus complète (Alertmanager, kube-state-metrics, Operator/CRDs, alerting) que les 8 fichiers de la partie 1. C'est tout l'intérêt d'un chart communautaire pour un composant d'infra standard.
+
+### Réflexion théorique — Pourquoi port-forward pour Grafana ?
+
+**Question 1 — Combien de fichiers ? (rappel)**
+
+0 fichier via le chart contre 8 en partie 1 — détaillé juste au-dessus (« Installer — nombre de fichiers »).
+
+**Question 2 — Quel mécanisme rend TaskFlow accessible sur `:80` sans port-forward ?**
+
+Deux pièces se combinent :
+
+- `k8s/kind-config.yaml` : `extraPortMappings` mappe les ports `80`/`443` de l'hôte vers le conteneur control-plane, et le label `ingress-ready=true` épingle le pod ingress-nginx sur ce nœud (le seul à exposer 80/443 sur la machine).
+- `k8s/base/ingress.yaml` : un Ingress `ingressClassName: nginx` déclare `/api → api-gateway:3000` et `/ → frontend:80`. Le controller ingress-nginx watch les objets Ingress et les traduit en blocs `server`/`location` NGINX.
+
+Chaîne complète : `http://localhost:80` → port mapping kind → control-plane `:80` → ingress-nginx → règle Ingress → Service ClusterIP → kube-proxy → pod. Le controller est un point d'entrée **permanent et mappé sur l'hôte**, d'où l'absence de port-forward.
+
+**Question 3 — Pourquoi ça ne marche pas pour Grafana ?**
+
+Parce qu'**aucun Ingress n'existe pour Grafana**. kube-prometheus-stack expose `monitoring-grafana` en `ClusterIP` sans Ingress par défaut. ingress-nginx ne route que ce qu'un Ingress déclare → aucune règle ne pointe vers Grafana, rien sur `:80` ne l'atteint. Un `ClusterIP` n'étant joignable que depuis l'intérieur du cluster, seul `kubectl port-forward` (tunnel via l'API Server) y donne accès.
+
+Le namespace n'est pas le blocage en soi — ingress-nginx watch tous les namespaces — mais l'Ingress devrait vivre dans `monitoring` pour référencer le Service `monitoring-grafana`.
+
+**Question 4 — Rendre Grafana accessible sur `http://localhost/grafana` (sans toucher au chart)**
+
+Tout passe par des **overrides de values** (méthode supportée, le code du chart reste intact). Dans `values.monitoring.yaml` :
+
+```yaml
+grafana:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    path: /grafana
+    pathType: Prefix
+    hosts: ["localhost"]
+  grafana.ini:
+    server:
+      root_url: "http://localhost/grafana"
+      serve_from_sub_path: true
+```
+
+Deux éléments indispensables :
+
+1. **L'Ingress** (exposé par le sous-chart Grafana) crée la règle `/grafana → monitoring-grafana:80` que ingress-nginx route.
+2. **`serve_from_sub_path: true` + `root_url`** : sinon Grafana sert depuis `/` et ses redirections/assets cassent sous un sous-chemin.
+
+Puis `helm upgrade`. Quand kube-prometheus-stack devient une dépendance de notre chart local (Étape 2+), ces valeurs s'imbriquent sous la clé `kube-prometheus-stack:`. Alternative : écrire son propre Ingress dans `monitoring` avec l'annotation `nginx.ingress.kubernetes.io/rewrite-target`, mais `serve_from_sub_path` reste nécessaire pour que Grafana génère les bonnes URLs.
+
+## Étape 2 — Intégrer ses dashboards customs
+
+### Vérifier le mécanisme avec un ConfigMap inline
+
+**Question 1 — Commande utilisée et présence du dashboard dans Grafana**
+
+```bash
+kubectl apply -f helm/monitoring/templates/dashboard-configmap.yaml
+```
+
+Le fichier déclare déjà `namespace: monitoring`, inutile de préciser `-n`.
+
+Le sidecar Grafana (activé dans `values.monitoring.yaml` : `grafana.sidecar.dashboards.enabled: true`, label `grafana_dashboard`) watch les ConfigMaps portant ce label dans le namespace `monitoring` et importe leur JSON automatiquement. Dans Grafana (`http://localhost/grafana` via l'Ingress, ou port-forward sur `:3100`) → **Dashboards**, le dashboard **« TaskFlow — Services »** apparaît sans le déclarer côté Grafana.
+
+![alt text](screenshots/grafana-dashboard-configmap.png)
+
+À noter : ce ConfigMap est appliqué via `kubectl` et non par Helm — la ressource vit donc **hors du contrôle de Helm**. C'est volontaire ici : le JSON contient `"{{ job }}"` (variable de légende Grafana), qui serait interprété comme du template Go et casserait un `helm install`. L'étape suivante (`.Files.Glob`) corrige ce point en chargeant les JSON depuis un dossier.

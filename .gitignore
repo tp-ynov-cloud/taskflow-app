@@ -9,3 +9,5 @@ kubeconfig.yml
 # Helm secrets (jamais commités)
 helm/**/secrets.*.yaml
 !helm/**/secrets.*.yaml.example
+helm/**/*.secret.yaml
+!helm/**/*.secret.example.yaml
