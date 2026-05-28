@@ -1113,3 +1113,47 @@ Différence fondamentale : **la granularité du rollback**.
 `helm rollback taskflow 1` ramène **toutes les ressources de la release** à leur état de la révision 1, en une transaction. Si la release v2 avait modifié le Deployment **et** son ConfigMap **et** ajouté un Secret, le rollback Helm restaure les trois ; le `kubectl rollout undo`, lui, restaure le Deployment mais laisse le ConfigMap v2 et le Secret v2 en place — état incohérent où le pod tourne avec l'ancienne image mais lit la nouvelle config.
 
 Helm tracke l'ensemble du bundle déployé comme une unité. Kube tracke l'historique d'un seul Deployment, isolément. Dès que la release modifie plusieurs objets ensemble (ce qui est le cas standard avec une chart Helm), seul `helm rollback` garantit la cohérence de l'état restauré.
+
+---
+
+# Partie 4B — Helm
+
+![alt text](screenshots/helm-deps.png)
+
+## Étape 1 — Via chart officiel
+
+### Réflexion théorique — Dépendances et composition
+
+**Question 1 — Si l'installation de Grafana échoue, Helm annule-t-il aussi Prometheus ?**
+
+`kube-prometheus-stack` est **une seule release** : Prometheus, Grafana, Alertmanager et kube-state-metrics sont des sous-charts, mais Helm rend tout en un seul jeu de manifests appliqué comme un bundle.
+
+Par défaut, **non**. Helm n'est pas transactionnel : si une ressource échoue, la release passe en `failed` et tout ce qui a déjà été créé reste en place — Prometheus survit à l'échec de Grafana. Aucun rollback automatique.
+
+On obtient le "tout ou rien" avec `--rollback-on-failure`. À l'échec : un `install` est désinstallé entièrement, un `upgrade` est ramené à la révision précédente. Donc oui, avec ce flag, l'échec de Grafana annule aussi Prometheus.
+
+Trois limites à connaître :
+
+- **Encore faut-il détecter l'échec.** Par défaut `--wait` vaut `hookOnly` : Helm marque la release réussie dès que l'API Server accepte les manifests, un pod Grafana qui crashe ensuite passe inaperçu. `--rollback-on-failure` force `--wait` à `watcher` → Helm attend que les ressources soient prêtes (jusqu'à `--timeout`), et un Grafana non-`Ready` déclenche le rollback.
+- **Best-effort, pas une transaction ACID** — et les **CRDs** font exception : celles posées par le chart ne sont pas supprimées au rollback/uninstall, elles resteront.
+- Prévoir un `--timeout` large : 5m (défaut) est court pour cette stack qui tire beaucoup d'images, sinon on rollback une install qui démarrait juste lentement.
+
+**Question 2 — Adapter les commandes pour garantir ce comportement**
+
+Ajouter `--rollback-on-failure` et un `--timeout` généreux (plus `--cleanup-on-fail` en upgrade, qui supprime les ressources nouvellement créées par un upgrade raté) :
+
+```bash
+# install
+helm install monitoring prometheus-community/kube-prometheus-stack \
+  -n monitoring --create-namespace \
+  --rollback-on-failure --timeout 10m \
+  --set grafana.adminPassword=admin
+
+# upgrade --install
+helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+  -n monitoring --create-namespace \
+  --rollback-on-failure --cleanup-on-fail --timeout 10m \
+  --set grafana.adminPassword=admin
+```
+
+`--rollback-on-failure` activant déjà `--wait=watcher`, la réussite n'est déclarée qu'une fois tous les pods prêts — sinon rollback complet de la release.
