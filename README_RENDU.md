@@ -1519,3 +1519,38 @@ Les deux charts déclarent des sous-charts (`kube-prometheus-stack`, `redis` Bit
 Le smoke test fourni faisait `kubectl port-forward svc/api-gateway 8080:3004`, or le Service `api-gateway` expose le port **3000** (env `PORT=3000`, containerPort, Service ; `3004` n'apparaît nulle part ailleurs). Corrigé en `8080:3000` (staging + prod) — sinon `curl /health` échoue et le smoke test ne peut pas passer.
 
 > Lint + template validés en local (helm v4.1.4) sur les trois variantes avant push.
+
+![alt text](screenshots/github-deploy.png)
+
+## Questions théoriques
+
+**Question 1 — `needs: [deploy-staging]` : que garantit-il ? Pourquoi insuffisant seul ?**
+
+Il garantit l'**ordre** et la **condition de succès** : production ne démarre que si staging a réussi (dépendance dans le DAG des jobs). Mais `needs` enchaîne **automatiquement** — dès que staging passe, prod se déploierait sans intervention humaine, sans validation au-delà du smoke test. La vraie protection vient de l'**environnement GitHub `production` + required reviewers** (approbation manuelle). `needs` = ordre technique ; l'environnement protégé = gate humain. Les deux sont complémentaires.
+
+**Question 2 — `helm upgrade --install` vs `helm install` ? Pourquoi en CD ?**
+
+- `helm install` : crée la release, **échoue si elle existe déjà**.
+- `helm upgrade` : met à jour, **échoue si elle n'existe pas**.
+- `helm upgrade --install` : installe si absente, sinon met à jour → **idempotent**.
+
+En CD le pipeline tourne à chaque push : le 1ᵉʳ run installe, les suivants mettent à jour. `upgrade --install` couvre les deux cas avec une seule commande, sans tester l'état préalable — indispensable que le cluster soit éphémère (kind = toujours une install) ou persistant (mise à jour).
+
+**Question 3 — Clusters Kind éphémères : 2 problèmes en vraie prod ? Solution ?**
+
+1. **État non persistant** : cluster, PV et données (Postgres) détruits à la fin du job. Une prod tourne en continu et doit conserver l'état entre deux déploiements.
+2. **Cluster isolé / inaccessible** : il vit dans le runner (7 Go, pas de réseau public, pas de DNS/LB, pas d'utilisateurs) → le déploiement ne sert personne et ne reflète pas la prod.
+
+Solution : cibler un **vrai cluster managé persistant** (EKS/GKE/AKS) via un secret `KUBECONFIG_B64`, en remplaçant le step *Create kind cluster* par une connexion à ce cluster. Le reste (`helm upgrade --install`) ne change pas.
+
+**Question 4 — Limite de `--set` pour les secrets ? Alternative K8s ?**
+
+`--set postgres.password=…` met le secret **sur la ligne de commande** (visible dans `ps`, risque de fuite dans les logs) et le stocke **en clair dans les values de la release** (Secret de release Helm). Pas de chiffrement, ni rotation, ni audit.
+
+Alternative : un **Secret Kubernetes** référencé par `valueFrom: secretKeyRef` (la valeur ne transite plus par la CLI), idéalement alimenté par un **gestionnaire externe** (Vault, AWS Secrets Manager) via **External Secrets Operator** / CSI Secret Store → rotation + audit. Pour garder les values versionnées dans Git : **helm-secrets** (chiffrement SOPS/age/KMS).
+
+**Question 5 — Pourquoi `values.ci.yaml` coupe Grafana/Alertmanager ? `values.monitoring.yaml` seul sur 7 Go ?**
+
+Le but de la CI = valider que les charts s'installent et que l'app répond (smoke test), pas faire tourner l'observabilité complète. `values.ci.yaml` ne garde qu'un Prometheus minimal (rétention 1h, ressources réduites) et coupe Grafana + Alertmanager + node-exporter → install rapide qui tient dans le runner.
+
+Avec `values.monitoring.yaml` seul (Grafana + Alertmanager + nodeExporter + Prometheus 7j) sur 7 Go : les pods réclament plus de RAM que disponible → `Pending` (Insufficient memory) ou **OOMKilled**, et `helm --wait --timeout 10m` n'atteint jamais l'état ready → **job en timeout/échec**. Lourd et inutile pour une simple validation.
