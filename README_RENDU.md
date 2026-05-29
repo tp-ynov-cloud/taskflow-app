@@ -1441,3 +1441,81 @@ Partiellement : redondance (≥ 2 replicas) + readiness + self-healing → rési
 - **Cluster Autoscaler** pour remplacer un nœud perdu.
 
 > Nuance : la commande du TP `kubectl delete pod -l app=api-gateway` supprime **tous** les pods du label (les 2) → bref outage le temps de la recréation. Pour démontrer la HA (survie à la perte d'**un** pod), on en supprime un seul — d'où le 0 échec.
+
+---
+
+# Partie 5 BONUS — CI/CD Helm : Staging & Production
+
+## Étape 1 — Configurer les GitHub Secrets
+
+Secrets réellement présents via `${{ secrets.* }}` dans `deploy.yml` (`grep`) :
+
+| Secret | Où | Rôle |
+|---|---|---|
+| `DOCKERHUB_USERNAME` | `Prepare * namespace` (staging l.103, prod l.168) | identifiant Docker Hub du `dockerhub-secret` (pull des images) |
+| `DOCKERHUB_TOKEN` | staging l.104, prod l.169 | token d'accès Docker Hub (jamais le mot de passe) |
+
+Secrets attendus par les steps à compléter en Étape 3 (en-tête du workflow + question théorique 4) :
+
+| Secret | Où | Rôle |
+|---|---|---|
+| `POSTGRES_PASSWORD_PROD` | `deploy-production` | injecté via `--set postgres.password` (interdit en clair dans le repo) |
+| `SMTP_HOST` | monitoring prod | → `alertmanagerConfig.smtp.host` |
+| `SMTP_FROM` | monitoring prod | → `alertmanagerConfig.smtp.from` |
+| `SMTP_USERNAME` | monitoring prod | → `alertmanagerConfig.smtp.username` |
+| `SMTP_PASSWORD` | monitoring prod | → `alertmanagerConfig.smtp.password` |
+| `SMTP_TO` | monitoring prod | → `alertmanagerConfig.smtp.to` |
+
+Tous créés dans **Settings → Secrets and variables → Actions** (secrets de dépôt). Les 5 SMTP sont optionnels en CI : `values.ci.yaml` désactive l'Alertmanager, donc staging tourne sans — ils ne servent qu'au monitoring de production.
+
+## Étape 3 — Compléter le workflow
+
+### Condition du job `validate`
+
+`if` au niveau du job : ne s'exécute que sur déclenchement manuel **ou** si la CI qui l'a déclenché a réussi (évite de valider après un build raté).
+
+```yaml
+if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+```
+
+### Lint & Template (`validate`)
+
+Même structure pour les trois charts ; `helm template` ajoute juste le **nom de release** et le tag d'image.
+
+| Chart | Namespace | Values | `--set` |
+|---|---|---|---|
+| monitoring | `monitoring` | `values.monitoring.yaml` + `values.ci.yaml` | — |
+| taskflow staging | `staging` | `values.yaml` + `values.staging.yaml` | `image.tag` (template) |
+| taskflow production | `production` | `values.yaml` + `values.production.yaml` | `image.tag` (template) + `postgres.password=ci-placeholder` |
+
+`values.ci.yaml` désactive grafana/alertmanager → pas d'erreur de SMTP manquant. En prod, `postgres.password` est passé en **placeholder** (jamais le vrai secret dans un job de validation). Le tag vient de `${{ env.IMAGE_TAG }}` (SHA du build CI). Commande de rendu = `helm template` (dry-run client).
+
+### Deploy staging & production
+
+`helm upgrade --install` (installe si absent, sinon met à jour) avec `--wait` :
+
+- **staging** — monitoring (`--create-namespace`, `--timeout 10m`) + taskflow (ns `staging` déjà créé par *Prepare staging namespace*, `--set image.tag`, `--timeout 5m`).
+- **production** — identique, deux différences :
+  - monitoring : injection des 5 secrets SMTP via `--set alertmanagerConfig.smtp.*=${{ secrets.SMTP_* }}`.
+  - taskflow : `values.production.yaml` + `--set postgres.password=${{ secrets.POSTGRES_PASSWORD_PROD }}`.
+
+### Step manquante
+
+Les deux charts déclarent des sous-charts (`kube-prometheus-stack`, `redis` Bitnami). Il manquait dans **chaque job** la récupération de ces dépendances avant tout lint/template/install :
+
+```yaml
+- name: Build Helm chart dependencies
+  run: |
+    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+    helm repo add bitnami https://charts.bitnami.com/bitnami
+    helm dependency build ./helm/monitoring
+    helm dependency build ./helm/taskflow
+```
+
+`helm dependency build` exige les repos ajoutés au préalable (sinon `Error: no repository definition for ...`).
+
+### Correctif annexe — port du smoke test
+
+Le smoke test fourni faisait `kubectl port-forward svc/api-gateway 8080:3004`, or le Service `api-gateway` expose le port **3000** (env `PORT=3000`, containerPort, Service ; `3004` n'apparaît nulle part ailleurs). Corrigé en `8080:3000` (staging + prod) — sinon `curl /health` échoue et le smoke test ne peut pas passer.
+
+> Lint + template validés en local (helm v4.1.4) sur les trois variantes avant push.
